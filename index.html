@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>RUSZKOWSKI: ZDAJ ALBO POWTARZAJ</title>
+<!-- PWA / Android -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0b1a33">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- iOS: pełny ekran po dodaniu do ekranu początkowego -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ruszkowski">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<style>
+*{box-sizing:border-box;user-select:none;-webkit-user-select:none}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:none;background:#080e1d;color:#fff;font-family:Arial,sans-serif;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body{display:grid;place-items:center;height:100dvh;position:fixed;inset:0}
+#rotate{padding-bottom:env(safe-area-inset-bottom,0px)}
+#game{position:relative;width:min(100vw,177.7778vh);height:min(56.25vw,100vh)}
+@supports(height:100dvh){#game{width:min(100vw,177.7778dvh);height:min(56.25vw,100dvh)}}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#rotate{display:none;position:fixed;bottom:8px;width:100%;text-align:center;font-size:13px;pointer-events:none;color:#fcd978}
+@media(orientation:portrait){#rotate{display:block}}
+</style>
+</head>
+<body>
+<div id="game"><canvas id="canvas" aria-label="Gra: zbieraj piątki i unikaj jedynek"></canvas></div>
+<div id="rotate">Obróć telefon poziomo</div>
+<script>
+'use strict';
+// MOBILE — pełny ekran, blokada orientacji poziomej, wibracje, praca offline.
+// Wszystko opcjonalne: brak API (np. iOS Safari) nigdy nie blokuje gry.
+const IS_TOUCH=matchMedia('(pointer:coarse)').matches;
+function goFullscreen(){
+  const el=document.documentElement;
+  if(document.fullscreenElement||!IS_TOUCH)return;
+  const req=el.requestFullscreen||el.webkitRequestFullscreen;
+  if(req){try{const p=req.call(el,{navigationUI:'hide'});if(p&&p.catch)p.catch(()=>{});}catch{}}
+}
+function lockLandscape(){
+  try{if(screen.orientation&&screen.orientation.lock)screen.orientation.lock('landscape').catch(()=>{});}catch{}
+}
+document.addEventListener('fullscreenchange',()=>{if(document.fullscreenElement)lockLandscape();});
+function vibrate(pattern){try{if(IS_TOUCH&&navigator.vibrate)navigator.vibrate(pattern);}catch{}}
+if('serviceWorker' in navigator&&location.protocol!=='file:'){
+  window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+}
+// Stała blokada w trybie standalone (PWA/Capacitor) — bez fullscreen API iOS nadal użyje meta apple-mobile-web-app-capable.
+lockLandscape();
+// CONFIG POZIOMÓW — target: cel piątek; prędkości w pikselach logicznych/s.
+// exam: udział sprawdzianów wśród jedynek; interval: odstęp spawnu w sekundach.
+const BASE_LEVELS = [
+  {target:12, time:35, speed:168, interval:0.8925, good:0.60, diagonal:0,    exam:0,    brightness:1},
+  {target:16, time:40, speed:246, interval:0.7225, good:0.50, diagonal:0.35, exam:0,    brightness:0.85},
+  {target:16, time:60, speed:324, interval:0.5950, good:0.40, diagonal:0.70, exam:0.35, brightness:0.85},
+  {target:20, time:55, speed:350, interval:1.0, good:1, diagonal:0.30, exam:0, brightness:0.80},
+  {target:14, time:65, speed:0, interval:1.8, good:1, diagonal:0, exam:0, brightness:0.90}
+];
+// WYBÓR TRUDNOŚCI — normalny zachowuje dotychczasowy balans.
+const DIFFICULTIES=[
+  {name:'Łatwy',key:'easy',targets:[8,12,12,14,10],times:[50,60,75,70,65],speed:0.8,interval:1.1,good:0.10,series:1},
+  {name:'Normalny',key:'normal',targets:[12,16,16,20,14],times:[35,40,60,55,65],speed:1,interval:1,good:0,series:2},
+  {name:'Trudny',key:'hard',targets:[14,18,20,24,18],times:[35,40,50,50,60],speed:1.1,interval:0.9,good:0,series:3}
+];
+let difficulty=1;
+let LEVELS=BASE_LEVELS.map(x=>({...x}));
+const sessionBests=[0,0,0];
+function recordKey(){return 'ruszkowski-five-action-v2-'+DIFFICULTIES[difficulty].key;}
+function applyDifficulty(){
+  const d=DIFFICULTIES[difficulty];
+  LEVELS=BASE_LEVELS.slice(0,d.targets.length).map((x,i)=>({...x,target:d.targets[i],time:d.times[i],
+    speed:x.speed*d.speed,interval:x.interval*d.interval,good:Math.min(1,x.good+d.good)}));
+  best=readBest();
+}
+const W=1280, H=720, FLOOR=H*0.85, PLAYER_H=H*0.22;
+const BOOST_TIME=3, BOOST_EVERY=20, BOOST_FIRST=9, MAGNET=150;
+const EXAM_WARNING=0.7, INVULNERABLE=0.8;
+// Nowa wersja punktacji ma osobny rekord; brak dostępu do zapisu nie blokuje gry.
+// Każdy tryb ma osobny rekord, również gdy zapis jest zablokowany.
+function readBest(){
+  try{const n=Number(localStorage.getItem(recordKey()));return Math.max(sessionBests[difficulty],Number.isSafeInteger(n)&&n>=0?n:0);}catch{return sessionBests[difficulty];}
+}
+function saveBest(){sessionBests[difficulty]=best;try{localStorage.setItem(recordKey(),String(best));}catch{}}
+const canvas=document.getElementById('canvas'), ctx=canvas.getContext('2d');
+let dpr=1;
+function resize(){
+  const box=canvas.getBoundingClientRect();
+  dpr=window.devicePixelRatio||1;
+  canvas.width=Math.max(1,Math.round(box.width*dpr));
+  canvas.height=Math.max(1,Math.round(box.height*dpr));
+}
+window.addEventListener('resize',resize); resize();
+// Po obrocie / wejściu w pełny ekran przeglądarki mobilne zgłaszają wymiary z opóźnieniem.
+for(const ev of ['orientationchange','fullscreenchange'])window.addEventListener(ev,()=>{resize();setTimeout(resize,250);});
+
+// ASSETS — brak obrazu nigdy nie blokuje startu gry.
+const assets={};
+// GitHub Pages rozróżnia wielkość liter. Najpierw sprawdzamy nazwę docelową,
+// potem typowe warianty eksportu — bez fetch, również dla file://.
+const assetFiles={
+  damian:['damian.png','damian.png.png','Damian.png','damian.PNG'],
+  uczen:['uczen.png','uczen.png.png','Uczen.png','uczen.PNG','uczeń.png','Uczeń.png'],
+  uczennica:['uczennica.png','uczennica.png.png','Uczennica.png','uczennica.PNG'],
+  logo:['logo.png','logo.png.png','Logo.png','logo.PNG','Logo.PNG'],
+  pand:['pan-d.png','pan_d.png','pand.png','lukasz.png'],
+  bg:['bg.png','bg.png.png','Bg.png','bg.PNG']
+};
+for(const [name,files] of Object.entries(assetFiles)){
+  const paths=['assets','Assets'].flatMap(folder=>files.map(file=>'./'+folder+'/'+file));
+  const img=new Image();assets[name]=img;
+  let attempt=0;
+  img.onerror=()=>{
+    if(attempt<paths.length)img.src=paths[attempt++];
+    else console.warn('Nie znaleziono grafiki '+name+'. Sprawdź pliki w assets/.');
+  };
+  img.onload=()=>{img.onerror=null;};
+  img.src=paths[attempt++];
+}
+function ready(img){return img&&img.complete&&img.naturalWidth>0;}
+function picture(name,x,y,w,h){
+  const img=assets[name];
+  if(ready(img)){ctx.drawImage(img,x,y,w,h);return;}
+  ctx.fillStyle=name==='uczen'?'#8392a7':name==='uczennica'?'#b0788c':'#345079';
+  ctx.fillRect(x,y,w,h); text(name,x+w/2,y+h/2,18);
+}
+function logo(x,y,h){
+  const im=assets.logo, w=h*(ready(im)?im.naturalWidth/im.naturalHeight:0.8125);
+  picture('logo',x-w/2,y,w,h);
+}
+
+// STAN GRY — checkpoint cofa punkty nieudanej próby, zapobiegając farmieniu.
+let state='title',level=0,selected=0,score=0,best=readBest(),checkpoint=0;
+// WYBÓR POSTACI — uczeń lub uczennica w klasach 1–4 i jako kibic w finale.
+let hero='uczen';
+try{if(localStorage.getItem('ruszkowski-hero')==='uczennica')hero='uczennica';}catch{}
+function setHero(h){hero=h;try{localStorage.setItem('ruszkowski-hero',h);}catch{}}
+function fem(){return hero==='uczennica';}
+function heroLabel(){return fem()?'UCZENNICA':'UCZEŃ';}
+let fives=0,ones=0,elapsed=0,spawnIn=0.8,boostIn=BOOST_EVERY,boost=0;
+let items=[],sparks=[],shake=0,clock=0,paused=false,menuAge=0;
+let examQueue=0,examIn=0,failure='';
+let combo=0,invulnerable=0,retried=false,notice='',noticeTime=0;
+function announce(message){notice=message;noticeTime=2.5;}
+const player={x:W/2,dir:1,moving:false,red:0,green:0,knock:0};
+function clearInput(){keys.clear();pointers.clear();firePointers.clear();player.moving=false;}
+function menu(next){state=next;menuAge=0;clearInput();}
+function startLevel(){
+  score=checkpoint;fives=0;ones=0;elapsed=0;boost=0;
+  examQueue=0;examIn=0;failure='';
+  combo=0;invulnerable=0;notice='';noticeTime=0;
+  spawnIn=0.8;boostIn=BOOST_FIRST;items=[];sparks=[];shake=0;
+  Object.assign(player,{x:W/2,dir:1,moving:false,red:0,green:0,knock:0});
+  selected=level===4?1:0;
+  resetTeacher();resetFinal();resetBoss();
+  paused=false;clearInput();state='play';
+}
+function newGame(){applyDifficulty();retried=false;level=0;selected=0;checkpoint=0;startLevel();}
+function advance(){
+  if(menuAge<0.2)return;
+  if(state==='title'||state==='win')menu('difficulty');
+  else if(state==='difficulty')menu('character');
+  else if(state==='character')newGame();
+  else if(state==='repeat'){retried=true;startLevel();}
+  else if(state==='promotion'){level++;retried=false;checkpoint=score;menu('briefing');}
+  else if(state==='briefing')startLevel();
+}
+function failLevel(reason){failure=reason;sound('sad');vibrate([120,80,200]);menu('repeat');}
+function finishLevel(){
+  if(ones===0)score+=500;
+  sound('fanfare');vibrate([40,40,40,40,90]);
+  if(level===LEVELS.length-1){best=Math.max(best,score);saveBest();menu('win');}
+  else menu('promotion');
+}
+function togglePause(){if(state==='play'){paused=!paused;clearInput();}}
+
+// INPUT — Pointer Events obsługują także kilka palców naraz.
+const keys=new Set(),pointers=new Map(),firePointers=new Set();
+const fireBox={x:1010,y:632,w:250,h:74};
+function point(e){const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};}
+function inside(p,r){return p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h;}
+const muteBox={x:1190,y:14,w:72,h:54},pauseBox={x:1105,y:14,w:72,h:54};
+const difficultyCards=[{x:115,y:260,w:330,h:270},{x:475,y:260,w:330,h:270},{x:835,y:260,w:330,h:270}];
+const characterCards=[{x:270,y:190,w:320,h:360},{x:690,y:190,w:320,h:360}];
+window.addEventListener('keydown',e=>{
+  const k=e.key.toLowerCase();
+  if(['arrowleft','arrowright','a','d','enter','p','r','m',' '].includes(k))e.preventDefault();
+  unlockAudio();
+  if(e.repeat)return;
+  keys.add(k);
+  if(k==='m')muted=!muted;
+  if(k==='p')togglePause();
+  if(k==='r'&&state==='play'){retried=true;startLevel();}
+  if(state==='difficulty'&&['arrowleft','a','arrowright','d'].includes(k)){
+    difficulty=Math.max(0,Math.min(2,difficulty+(['arrowleft','a'].includes(k)?-1:1)));
+  }
+  if(state==='character'&&['arrowleft','a','arrowright','d'].includes(k))setHero(['arrowleft','a'].includes(k)?'uczen':'uczennica');
+  if(k==='enter'){if(paused)togglePause();else advance();}
+});
+window.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
+canvas.addEventListener('pointerdown',e=>{
+  e.preventDefault();unlockAudio();goFullscreen();const p=point(e);
+  if(inside(p,muteBox)){muted=!muted;return;}
+  if(state==='play'){
+    if(inside(p,pauseBox)||paused){togglePause();return;}
+    if(level===4&&inside(p,fireBox))firePointers.add(e.pointerId);
+    else pointers.set(e.pointerId,p.x<W/2?-1:1);
+    try{canvas.setPointerCapture(e.pointerId);}catch{}
+  }else if(state==='difficulty'){
+    if(menuAge<0.2)return;
+    const i=difficultyCards.findIndex(r=>inside(p,r));
+    if(i>=0)difficulty=i;
+    advance();
+  }else if(state==='character'){
+    if(menuAge<0.2)return;
+    const i=characterCards.findIndex(r=>inside(p,r));
+    if(i>=0)setHero(i?'uczennica':'uczen');
+    advance();
+  }else advance();
+});
+canvas.addEventListener('pointermove',e=>{
+  if(pointers.has(e.pointerId))pointers.set(e.pointerId,point(e).x<W/2?-1:1);
+});
+for(const event of ['pointerup','pointercancel','lostpointercapture'])
+  canvas.addEventListener(event,e=>{pointers.delete(e.pointerId);firePointers.delete(e.pointerId);});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('blur',()=>{clearInput();if(state==='play')paused=true;});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){clearInput();if(state==='play')paused=true;}});
+
+// AUDIO — synteza bez plików; odblokowanie dopiero po geście użytkownika.
+let audio=null,muted=false;
+function unlockAudio(){
+  try{
+    if(!audio){const Audio=window.AudioContext||window.webkitAudioContext;if(Audio)audio=new Audio();}
+    if(audio&&audio.state==='suspended')audio.resume().catch(()=>{});
+  }catch{}
+}
+function tone(freq,delay,duration,type='sine',end=freq){
+  if(!audio||muted||audio.state!=='running')return;
+  try{
+    const t=audio.currentTime+delay,o=audio.createOscillator(),g=audio.createGain();
+    o.type=type;o.frequency.setValueAtTime(freq,t);
+    o.frequency.exponentialRampToValueAtTime(end,t+duration);
+    g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.10,t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+duration);
+    o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+duration+0.02);
+  }catch{}
+}
+function sound(kind){
+  if(kind==='ding'){tone(880,0,0.15);tone(1320,0.08,0.22);}
+  if(kind==='throw')tone(420,0,0.14,'triangle',110);
+  if(kind==='buzz')tone(150,0,0.25,'sawtooth',65);
+  if(kind==='clang'){tone(1600,0,0.16,'triangle',600);tone(2230,0,0.10);}
+  if(kind==='fanfare')[523,659,784,1047].forEach((f,i)=>tone(f,i*0.12,0.25,'triangle'));
+  if(kind==='sad')[392,370,330,196].forEach((f,i)=>tone(f,i*0.18,0.30,'sawtooth',f*0.9));
+  if(kind==='powerup')[440,660,880,1320].forEach((f,i)=>tone(f,i*0.08,0.2));
+}
+
+
+// ŁUKASZ — zamach, wyprost ręki, wypuszczenie pocisku i powrót.
+// Punkty maski są w układzie źródłowego obrazka 1145×1374.
+// Maska sylwetki w canvasie ukrywa namalowaną szachownicę PNG.
+const BOSS_SHAPE=[[707,17],[722,17],[750,23],[772,33],[773,35],[785,41],[808,63],[817,79],[819,80],[819,83],[821,84],[828,98],[832,112],[834,132],[831,156],[823,184],[826,182],[836,183],[839,188],[839,193],[835,204],[833,205],[827,217],[824,219],[819,232],[815,237],[815,240],[813,242],[813,250],[810,257],[806,261],[803,261],[801,263],[795,292],[797,293],[805,312],[807,329],[814,345],[815,355],[825,361],[836,371],[851,396],[859,421],[860,439],[862,444],[869,435],[879,416],[885,409],[894,392],[900,385],[917,385],[920,380],[929,379],[942,388],[948,390],[955,396],[964,400],[968,404],[972,405],[973,407],[984,412],[985,414],[989,415],[1008,428],[1017,432],[1018,434],[1042,446],[1053,454],[1067,460],[1069,464],[1069,470],[1064,480],[1077,485],[1070,498],[1066,502],[1065,507],[1062,508],[1054,505],[1048,516],[1048,518],[1052,521],[1061,524],[1049,547],[1044,549],[1034,569],[1030,569],[1027,566],[1025,566],[1023,569],[1038,586],[1041,594],[1041,602],[1038,617],[1036,623],[1033,626],[1035,633],[1035,654],[1033,664],[1027,679],[1014,694],[1000,701],[978,702],[965,708],[952,707],[948,713],[943,714],[935,711],[930,706],[928,708],[915,708],[890,686],[871,682],[849,672],[859,690],[859,700],[848,716],[864,742],[865,751],[859,761],[867,766],[868,775],[874,780],[877,786],[881,789],[881,791],[893,805],[895,810],[898,812],[898,814],[908,827],[911,835],[915,839],[925,859],[926,865],[928,866],[939,899],[952,925],[957,941],[954,961],[933,998],[907,1064],[895,1089],[904,1107],[904,1115],[900,1123],[895,1127],[895,1130],[906,1147],[905,1152],[911,1153],[917,1163],[923,1164],[926,1167],[926,1171],[937,1174],[944,1186],[970,1195],[1002,1199],[1018,1207],[1024,1217],[1025,1227],[1028,1227],[1031,1232],[1031,1248],[1026,1253],[1016,1256],[1012,1259],[993,1264],[962,1269],[926,1270],[904,1268],[880,1263],[839,1246],[833,1246],[814,1254],[791,1253],[756,1247],[744,1242],[738,1237],[737,1231],[739,1223],[739,1213],[740,1209],[746,1205],[746,1190],[751,1172],[754,1167],[754,1165],[752,1164],[752,1157],[754,1155],[760,1134],[757,1116],[757,1102],[777,1068],[773,1028],[774,1005],[783,983],[785,982],[792,969],[797,965],[798,957],[794,956],[790,952],[788,948],[787,934],[781,927],[766,919],[762,915],[755,912],[752,908],[744,904],[728,889],[726,889],[714,876],[712,876],[680,844],[672,843],[666,844],[664,846],[664,848],[655,857],[648,868],[644,871],[644,873],[638,878],[638,880],[629,889],[625,896],[615,906],[615,908],[589,935],[589,937],[556,969],[554,969],[550,973],[547,985],[537,993],[535,993],[532,997],[530,997],[527,1001],[525,1001],[510,1016],[502,1049],[492,1068],[484,1076],[484,1078],[471,1090],[471,1092],[464,1099],[462,1099],[461,1102],[433,1130],[437,1142],[437,1151],[417,1175],[409,1192],[409,1195],[405,1201],[403,1209],[390,1216],[391,1228],[397,1246],[399,1248],[400,1256],[405,1262],[412,1278],[413,1294],[417,1295],[419,1299],[419,1317],[417,1322],[407,1327],[372,1330],[303,1330],[283,1327],[281,1328],[260,1322],[252,1317],[246,1309],[247,1287],[248,1280],[251,1277],[254,1261],[256,1260],[261,1248],[266,1241],[275,1216],[278,1212],[278,1209],[276,1208],[273,1201],[273,1195],[280,1182],[275,1162],[275,1147],[282,1137],[292,1131],[304,1120],[304,1098],[308,1094],[308,1092],[315,1086],[318,1077],[320,1076],[336,1027],[343,1013],[343,1010],[345,1009],[345,1006],[356,986],[360,982],[364,974],[367,972],[367,970],[380,956],[400,943],[403,928],[408,918],[428,905],[428,883],[432,876],[449,865],[450,857],[461,822],[470,802],[472,801],[477,789],[480,786],[480,775],[482,771],[487,767],[486,758],[484,758],[480,754],[476,746],[476,732],[482,714],[472,704],[469,696],[469,685],[476,669],[490,649],[490,647],[486,644],[485,640],[482,637],[480,627],[482,617],[492,603],[488,592],[484,588],[472,564],[470,563],[470,560],[456,531],[447,502],[439,467],[427,463],[408,452],[393,437],[389,430],[382,426],[371,415],[366,405],[364,404],[357,384],[357,350],[352,347],[352,349],[348,352],[346,361],[343,367],[339,370],[335,381],[325,391],[317,394],[311,394],[303,390],[299,385],[299,374],[305,366],[306,360],[311,352],[319,324],[322,321],[327,309],[319,310],[311,316],[301,318],[293,325],[280,330],[271,330],[264,328],[260,326],[252,316],[252,305],[256,300],[278,290],[291,279],[307,271],[312,266],[341,254],[336,249],[326,244],[319,237],[317,237],[295,215],[288,202],[287,193],[289,186],[294,180],[299,177],[310,177],[317,183],[319,183],[328,192],[344,199],[355,207],[364,211],[373,221],[375,221],[387,232],[402,232],[403,230],[400,218],[393,207],[386,189],[383,176],[383,166],[386,153],[393,145],[400,142],[411,142],[416,144],[425,154],[435,176],[439,190],[450,211],[454,230],[460,238],[461,242],[464,243],[478,258],[493,261],[501,265],[502,267],[518,262],[526,263],[531,247],[539,238],[544,236],[549,219],[556,211],[556,209],[567,198],[569,198],[566,145],[569,139],[575,134],[583,134],[587,138],[589,138],[590,122],[596,94],[607,69],[609,68],[614,58],[616,58],[616,56],[624,48],[626,48],[626,46],[629,46],[629,44],[635,42],[639,38],[654,30],[684,20],[707,17]];
+const BOSS_ARM=[[550,298],[493,277],[463,244],[435,171],[421,151],[408,144],
+ [393,147],[386,159],[386,182],[400,240],[344,200],[320,184],[301,180],
+ [289,187],[286,201],[299,219],[327,243],[353,261],[281,297],[261,311],
+ [254,324],[260,334],[275,337],[314,323],[294,380],[303,388],[318,383],
+ [338,365],[354,364],[357,400],[380,460],[407,506],[454,547],[514,514],
+ [557,447],[575,368]];
+const boss={x:950,feet:390,w:224,h:PLAYER_H,face:1,t:0,wait:1.5,active:false,
+ aimX:640,shots:0,hp:5,maxHp:5,knock:0,tilt:0,flash:0,say:'',sayT:0,seriesCount:0,plan:[],defeated:false,moving:false};
+function resetBoss(){Object.assign(boss,{x:950,feet:405,w:PLAYER_H*1145/1374,h:PLAYER_H,t:0,wait:1.5,active:false,aimX:640,shots:0,face:1,
+ hp:DUEL.bossHp[difficulty],maxHp:DUEL.bossHp[difficulty],knock:0,tilt:0,flash:0,say:'',sayT:0,seriesCount:0,plan:[],defeated:false,moving:false});}
+function smooth(t){t=Math.max(0,Math.min(1,t));return t*t*(3-2*t);}
+// Faza pojedynku zależy od paska Łukasza: 0 spokojna, 1 serie, 2 furia.
+function duelPhase(){if(level!==4)return 0;const r=boss.hp/boss.maxHp;return r>0.6?0:r>0.3?1:2;}
+function bossPose(){
+ const t=boss.active?boss.t:0;
+ let a=0,lean=0;
+ // Wariant zamachu: 'arc' rzuca znad głowy (ręka wyżej), 'flat' płasko (ręka niżej).
+ const v=boss.plan[boss.shots]||'normal',hi=v==='arc'||v==='examArc'?1.55:v==='flat'?0.7:1;
+ if(boss.defeated){a=-0.35;lean=0.45;}
+ else if(boss.active){
+  if(t<0.42){a=0.13*hi*smooth(t/0.42);lean=0.055*smooth(t/0.42);}
+  else if(t<0.56){const p=smooth((t-0.42)/0.14);a=0.13*hi-0.23*hi*p;lean=0.055-0.12*p;}
+  else{const p=smooth((t-0.56)/0.46);a=-0.10*hi*(1-p);lean=-0.065*(1-p);}
+ }
+ lean+=boss.tilt;
+ const walk=boss.moving&&!boss.active?Math.abs(Math.sin(clock*14))*4:0;
+ return {a,lean,breathe:(boss.active?0:Math.sin(clock*3)*1.5)-walk};
+}
+function rotatePoint(x,y,px,py,a){
+ const dx=x-px,dy=y-py;return {x:px+dx*Math.cos(a)-dy*Math.sin(a),y:py+dx*Math.sin(a)+dy*Math.cos(a)};
+}
+function bossScale(){return level===4&&duelPhase()===2?1.1:1;}
+function bossHand(){
+ const pose=bossPose(),k=bossScale();
+ let p=rotatePoint(400,290,535,360,pose.a);
+ p=rotatePoint(p.x,p.y,650,760,pose.lean);
+ return {x:boss.x+boss.knock+boss.face*(p.x/1145-0.5)*boss.w*k,y:boss.feet-boss.h*k+p.y/1374*boss.h*k+pose.breathe};
+}
+function throwOne(){
+ const hand=bossHand();
+ const variant=boss.plan[boss.shots]||'normal';
+ let flight=[1.2,0.85,0.68][difficulty],gravity=440,kind='1';
+ if(variant==='flat'){gravity=150;flight*=0.8;}
+ if(variant==='arc'){gravity=950;flight*=1.3;}
+ if(variant==='exam'){kind='exam';}
+ if(variant==='examArc'){kind='exam';gravity=950;flight*=1.3;}
+ if(variant==='trap'){kind='trap';gravity=Math.random()<0.5?150:950;flight*=gravity>500?1.3:0.8;}
+ const offset=(boss.shots%2===0?-1:1)*(difficulty===2?55:35);
+ const target=Math.max(80,Math.min(W-80,boss.aimX+offset));
+ items.push({kind,x:hand.x,y:hand.y,vx:(target-hand.x)/flight,
+  vy:(FLOOR-PLAYER_H/2-hand.y-0.5*gravity*flight*flight)/flight,
+  gravity,phase:0,reflected:false,warning:0,thrown:true,age:0});
+ boss.shots++;sound('throw');burst(hand.x,hand.y,kind==='trap'?'#8bff9d':'#ff7975');
+ if(level===4&&duelPhase()===2)shake=Math.max(shake,0.12);
+}
+// Plan serii w finale: faza 0 pojedynczy rzut, faza 1 serie ze sprawdzianem, faza 2 furia z pułapką i podwójnym rzutem.
+function planSeries(){
+ if(level!==4)return [];
+ const ph=duelPhase(),n=Math.min(3,DIFFICULTIES[difficulty].series+(ph>0?1:0));
+ boss.seriesCount++;
+ const pick=()=>Math.random()<0.5?'flat':'arc';
+ if(ph===0)return [boss.seriesCount%3===0?'exam':pick()];
+ const out=[];for(let i=0;i<n;i++)out.push(pick());
+ if(ph===1){
+  if(Math.random()<0.15)out[0]='trap';
+  if(difficulty===2||boss.seriesCount%2===0)out[out.length-1]='exam';
+  return out;
+ }
+ for(let i=0;i<n;i++)if(Math.random()<0.35)out[i]='trap';
+ if(boss.seriesCount%2===0){out[0]='flat';out[1]='examArc';out.double=true;}
+ else out[out.length-1]='exam';
+ return out;
+}
+function updateBoss(dt){
+ boss.knock*=Math.exp(-9*dt);boss.tilt*=Math.exp(-7*dt);boss.flash=Math.max(0,boss.flash-dt);boss.sayT=Math.max(0,boss.sayT-dt);
+ if(boss.defeated)return;
+ const ph=duelPhase();
+ if(!boss.active){
+  boss.wait-=dt;
+  const center=level===4&&ph===2?800:950;
+  const destination=center+Math.sin(elapsed*0.7)*150;
+  const step=Math.max(-100*dt,Math.min(100*dt,destination-boss.x));
+  boss.x+=step;boss.moving=Math.abs(step)>0.2;
+  boss.face=player.x<boss.x?1:-1;
+  if(boss.wait<=0){boss.active=true;boss.moving=false;boss.t=0;boss.shots=0;boss.aimX=player.x;boss.plan=planSeries();}
+  return;
+ }
+ boss.t+=dt*(difficulty===0?0.65:1)*(level===4&&ph===2?1.6:1);
+ const count=level===4?boss.plan.length:DIFFICULTIES[difficulty].series;
+ const gap=boss.plan.double?0.05:0.13;
+ // Cel zostaje ustalony podczas zamachu. Jedynki nie śledzą gracza w locie.
+ while(boss.shots<count&&boss.t>=0.52+boss.shots*gap)throwOne();
+ if(boss.t>=1.04){boss.active=false;let wait=[1.1,0.32,0.10][difficulty];
+  if(level===4)wait=ph===0?wait*1.5+1.0:ph===1?wait+0.7:wait*0.7+0.3;boss.wait=wait;}
+}
+function bossPath(points){ctx.moveTo(points[0][0],points[0][1]);for(const p of points.slice(1))ctx.lineTo(p[0],p[1]);ctx.closePath();}
+function drawBoss(){
+ const pose=bossPose(),im=assets.pand,k=bossScale();
+ ctx.save();ctx.translate(boss.x+boss.knock,boss.feet-boss.h*k+pose.breathe);
+ if(level===4&&duelPhase()===2&&!boss.defeated){ctx.shadowColor='#ff3a2e';ctx.shadowBlur=26;}
+ if(boss.flash>0)ctx.filter='sepia(1) saturate(8) hue-rotate(315deg) brightness(1.2)';
+ ctx.scale(boss.face*boss.w*k/1145,boss.h*k/1374);ctx.translate(-572.5,0);
+ if(ready(im)){
+  // Nogi pozostają na ziemi; tułów obraca się w biodrach, ręka w barku.
+  ctx.save();ctx.beginPath();bossPath(BOSS_SHAPE);ctx.clip();
+  ctx.beginPath();ctx.rect(0,759,1145,615);ctx.clip();ctx.drawImage(im,0,0,1145,1374);ctx.restore();
+  ctx.save();ctx.translate(650,760);ctx.rotate(pose.lean);ctx.translate(-650,-760);
+  ctx.save();ctx.beginPath();bossPath(BOSS_SHAPE);ctx.clip();
+  ctx.beginPath();bossPath(BOSS_SHAPE);bossPath(BOSS_ARM);ctx.clip('evenodd');
+  ctx.beginPath();ctx.rect(0,0,1145,764);ctx.clip();ctx.drawImage(im,0,0,1145,1374);ctx.restore();
+  ctx.save();ctx.translate(535,360);ctx.rotate(pose.a);ctx.translate(-535,-360);
+  ctx.beginPath();bossPath(BOSS_SHAPE);ctx.clip();ctx.beginPath();bossPath(BOSS_ARM);ctx.clip();ctx.drawImage(im,0,0,1145,1374);ctx.restore();ctx.restore();
+ }else{
+  // Zastępstwo również wykonuje zamach i rzuca z tej samej pozycji dłoni.
+  ctx.fillStyle='#686e7b';ctx.fillRect(460,440,360,830);
+  ctx.fillStyle='#e8ae8b';ctx.beginPath();ctx.arc(650,245,155,0,Math.PI*2);ctx.fill();
+ }
+ ctx.restore();
+ const top=boss.feet-boss.h*k-36;
+ nameBadge(boss.defeated?'ŁUKASZ — URLOP':'ŁUKASZ',boss.x+boss.knock,top);
+ if(boss.sayT>0){
+  // Chmurka z komentarzem Łukasza.
+  const x=boss.x+boss.knock,y=top-46;ctx.save();ctx.globalAlpha=Math.min(1,boss.sayT*3);
+  ctx.font='700 19px Arial,sans-serif';const w=ctx.measureText(boss.say).width+30;
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.roundRect(x-w/2,y-18,w,36,12);ctx.fill();
+  ctx.beginPath();ctx.moveTo(x-8,y+17);ctx.lineTo(x+8,y+17);ctx.lineTo(x,y+28);ctx.fill();
+  text(boss.say,x,y+1,19,'#182437');ctx.restore();
+ }
+ if(boss.active&&boss.t<0.52){
+  const hand=bossHand(),v=boss.plan[boss.shots]||'normal';
+  const short=level===4&&duelPhase()===2;
+  text(short?'!!':'!',hand.x,hand.y-27,36,v==='trap'?'#8bff9d':v.startsWith('exam')?'#fff':'#ffda62');
+  if(!short){ctx.save();ctx.strokeStyle='rgba(255,100,90,.55)';ctx.lineWidth=2;ctx.setLineDash([7,8]);
+  ctx.beginPath();ctx.moveTo(hand.x,hand.y);ctx.lineTo(boss.aimX,FLOOR-PLAYER_H/2);ctx.stroke();ctx.restore();}
+ }
+}
+
+// SPAWNER — w klasie 3 sprawdziany zastępują część jedynek.
+function spawn(kind,fromSeries=false){
+  const cfg=LEVELS[level];
+  if(level===4&&kind!=='logo')return;
+  if(level===3){
+    if(kind&&kind!=='5'&&kind!=='logo')return;
+    kind=kind||'5';
+  }
+  if(!kind)kind=Math.random()<cfg.good?'5':(Math.random()<cfg.exam?'exam':'1');
+  // Długość serii zależy od trudności; odstęp między kartkami 0,55 s.
+  if(kind==='exam'&&!fromSeries&&examQueue===0){examQueue=DIFFICULTIES[difficulty].series-1;examIn=0.55;}
+  const diagonal=kind!=='logo'&&Math.random()<cfg.diagonal;
+  items.push({kind,x:100+Math.random()*(W-200),y:-90,
+    vx:diagonal?(Math.random()<0.5?-1:1)*cfg.speed*0.45:0,
+    vy:kind==='logo'?145:cfg.speed,phase:Math.random()*Math.PI*2,reflected:false,warning:kind==='exam'?EXAM_WARNING:0});
+}
+function size(o){return o.kind==='exam'?{w:150,h:64}:o.kind==='logo'?{w:58,h:70}:{w:54,h:70};}
+function bossTorso(){return {x:boss.x+boss.knock,y:boss.feet-boss.h*0.55};}
+function burst(x,y,color){
+  for(let i=0;i<12;i++)sparks.push({x,y,vx:(Math.random()-.5)*220,vy:-Math.random()*190,life:.5,color});
+}
+
+
+// DAMIAN — nauczyciel wspierający ucznia w klasach 2–4.
+const teacher={x:240,feet:405,h:PLAYER_H,dir:1,walkDir:1,moving:false,wait:3,t:0,active:false,released:false,aimX:640};
+const finalShot={t:0,active:false,released:false,cooldown:0};
+let friendly=[],fx=[];
+function resetTeacher(){Object.assign(teacher,{x:240,walkDir:1,moving:false,wait:3,t:0,active:false,released:false,dir:1});}
+function damianPose(t,active){
+  if(!active)return 0;
+  if(t<0.18)return -0.10*smooth(t/0.18);
+  if(t<0.28)return -0.10+0.24*smooth((t-0.18)/0.10);
+  return 0.14*(1-smooth((t-0.28)/0.22));
+}
+function damianHand(x,feet,h,dir,t,active){
+  // Dłoń z markerem w jedynej klatce Damiana; ten sam obrót co na ekranie.
+  const p=rotatePoint(h*0.15,-h*0.50,0,0,damianPose(t,active));
+  return {x:x+dir*p.x,y:feet+p.y};
+}
+function nameBadge(label,x,y){
+  panel(x-70,y,140,28,'rgba(9,19,39,.94)');text(label,x,y+14,18,'#ffda62');
+}
+function drawDamian(x,feet,h,dir,t,active,isPlayer=false){
+  const moving=isPlayer?player.moving:teacher.moving;
+  const bob=moving&&!active?Math.sin(clock*16)*3:0;
+  const tilt=damianPose(t,active)+(moving&&!active?Math.sin(clock*8)*0.025:0)+(isPlayer?player.tilt||0:0);
+  nameBadge('DAMIAN',x,feet-h-36);
+  feet+=bob;
+  ctx.save();ctx.translate(x,feet);ctx.scale(dir,1);ctx.rotate(tilt);
+  if(isPlayer&&invulnerable>0)ctx.globalAlpha=Math.sin(clock*35)>0?0.4:1;
+  if(isPlayer&&(boost>0||(level===4&&multiplier()>=3))){ctx.shadowColor='#ffda62';ctx.shadowBlur=24;}
+  if(isPlayer&&player.red>0)ctx.filter='sepia(1) saturate(8) hue-rotate(315deg)';
+  if(moving&&!active){
+    // Dwie nogi kołyszą się przeciwnie; tułów zakrywa połączenie w biodrach.
+    for(const side of [-1,1]){
+      ctx.save();ctx.translate(side*h*.035,-h*.39);ctx.rotate(Math.sin(clock*16)*side*.08);
+      ctx.translate(-side*h*.035,h*.39);ctx.beginPath();
+      ctx.rect(side===-1?-h/2:0,-h*.43,h/2,h*.46);ctx.clip();
+      picture('damian',-h/2,-h,h,h);ctx.restore();
+    }
+    ctx.save();ctx.beginPath();ctx.rect(-h/2,-h,h,h*.64);ctx.clip();
+    picture('damian',-h/2,-h,h,h);ctx.restore();
+  }else picture('damian',-h/2,-h,h,h);
+  ctx.restore();
+  if(active&&t<0.24){
+    const hand=damianHand(x,feet,h,dir,t,active);
+    text('5',hand.x,hand.y,27,'#60e473');
+  }
+}
+function updateTeacher(dt){
+  if(!teacher.active){
+    teacher.moving=true;teacher.x+=teacher.walkDir*90*dt;
+    if(teacher.x>540){teacher.x=540;teacher.walkDir=-1;}
+    if(teacher.x<150){teacher.x=150;teacher.walkDir=1;}
+    teacher.dir=teacher.walkDir;
+    teacher.wait-=dt;
+    if(teacher.wait<=0){teacher.active=true;teacher.t=0;teacher.released=false;
+      teacher.moving=false;teacher.aimX=player.x;teacher.dir=player.x<teacher.x?-1:1;}
+    return;
+  }
+  teacher.t+=dt;
+  if(!teacher.released&&teacher.t>=0.24){
+    const hand=damianHand(teacher.x,teacher.feet,teacher.h,teacher.dir,teacher.t,true);
+    const flight=1.1,gravity=440;
+    items.push({kind:'5',x:hand.x,y:hand.y,vx:(teacher.aimX-hand.x)/flight,
+      vy:(FLOOR-PLAYER_H/2-hand.y-0.5*gravity*flight*flight)/flight,
+      gravity,thrown:true,gift:true,phase:0,warning:0,reflected:false});
+    teacher.released=true;sound('ding');
+  }
+  if(teacher.t>=0.5){teacher.active=false;teacher.wait=[4,5,6][difficulty];}
+}
+function drawTeacher(){
+  drawDamian(teacher.x,teacher.feet,teacher.h,teacher.dir,teacher.t,teacher.active);
+
+}
+
+// KLASA 5 — RADA PEDAGOGICZNA: pojedynek Damiana z Łukaszem na paski argumentów.
+// Jedynka odbita piątką blisko Damiana wraca do Łukasza (−1). Sprawdzianu nie da się odbić (−2 dla Damiana).
+// Pułapka wygląda jak piątka: odbicie daje Łukaszowi +1. Kibic w tle reaguje i w kryzysie rzuca piątkę-życie.
+const DUEL={hp:[5,6,6],bossHp:[5,6,8],parry:[260,210,170],logoEvery:30};
+const duel={playerHp:5,maxHp:5,streak:0,hitStreak:0,ending:0,freeze:0,ghosts:[],helpSent:false};
+const fan={x:150,feet:400,h:120,mood:'idle',t:0,say:'',sayT:0,cheerIn:3,throwT:0};
+const LUKASZ_LINES=['Niemożliwe!','To był test!','Sprawdzam!','Poprawka?!','Hmm…','Zaraz, zaraz…'];
+const FAN_LINES=['DAWAJ!','ODBIJ!','DAMIAN!','JESZCZE RAZ!'];
+function resetFinal(){
+  fx=[];friendly=[];duel.freeze=0;duel.ghosts=[];duel.helpSent=false;
+  duel.maxHp=duel.playerHp=DUEL.hp[difficulty];duel.streak=0;duel.hitStreak=0;duel.ending=0;
+  Object.assign(fan,{mood:'idle',t:0,say:'',sayT:0,cheerIn:3,throwT:0});
+  Object.assign(finalShot,{t:0,active:false,released:false,cooldown:0});
+  player.tilt=0;
+}
+function multiplier(){return Math.min(3,1+Math.floor(duel.streak/3));}
+function fanSay(t,time=1.6){fan.say=t;fan.sayT=time;}
+function fanMood(mood,t=1.2){fan.mood=mood;fan.t=t;}
+function bossSay(){boss.say=LUKASZ_LINES[Math.floor(Math.random()*LUKASZ_LINES.length)];boss.sayT=1.6;}
+function hitSegment(x1,y1,x2,y2,left,top,right,bottom){
+  let near=0,far=1;
+  for(const [a,b,lo,hi] of [[x1,x2,left,right],[y1,y2,top,bottom]]){
+    const d=b-a;
+    if(Math.abs(d)<1e-9){if(a<lo||a>hi)return false;continue;}
+    let t0=(lo-a)/d,t1=(hi-a)/d;
+    if(t0>t1)[t0,t1]=[t1,t0];near=Math.max(near,t0);far=Math.min(far,t1);
+    if(near>far)return false;
+  }
+  return true;
+}
+function pop(x,y,label,color='#ffda62'){fx.push({x,y,label,color,life:0.8,maxLife:0.8});}
+function dropMarker(){fx.push({kind:'marker',x:player.x+player.dir*30,y:FLOOR-PLAYER_H*0.55,vx:-player.dir*180,vy:-330,rot:0,life:1.1,maxLife:1.1});}
+// Cel: najbliższy nadlatujący pocisk do odbicia (jedynka lub pułapka) w zasięgu 420 px.
+function aimTarget(){
+  let target=null,bestD=420;
+  for(const o of items){
+    if(o.warning>0||o.reflected||(o.kind!=='1'&&o.kind!=='trap'))continue;
+    const d=Math.hypot(o.x-player.x,o.y-(FLOOR-PLAYER_H*0.6));
+    if(d<bestD){target=o;bestD=d;}
+  }
+  return target;
+}
+function damagePlayer(amount,o){
+  if(invulnerable>0)return;
+  duel.playerHp=Math.max(0,duel.playerHp-amount);ones++;combo=0;duel.streak=0;duel.hitStreak++;
+  invulnerable=INVULNERABLE;player.red=.3;shake=.25;player.tilt=-0.26;dropMarker();
+  player.knock=(player.x>=o.x?1:-1)*450;sound('buzz');vibrate(amount>1?[70,50,120]:60);burst(o.x,o.y,'#e5322d');
+  pop(player.x,FLOOR-PLAYER_H,amount>1?'SPRAWDZIAN −2':'TRAFIENIE −1','#ff7975');
+  fanMood('sad',1.5);fanSay(amount>1?'O NIE…':':(',1.5);
+  if(duel.playerHp===1)announce('Ostatni argument! Kibic zasłania oczy.');
+  if(duel.hitStreak>=3&&!duel.helpSent){duel.helpSent=true;fanMood('throw',0.6);fan.throwT=0.35;}
+  if(duel.playerHp<=0)failLevel('Łukasz wygrał radę pedagogiczną — powtórka.');
+}
+function bossHit(o){
+  boss.hp=Math.max(0,boss.hp-1);boss.knock=boss.face*-1*70;boss.tilt=-0.22;boss.flash=0.3;bossSay();
+  const gain=100*multiplier();score+=gain;duel.streak++;duel.hitStreak=0;
+  pop(boss.x-boss.face*110,boss.feet-boss.h*0.5,'−1  +'+gain,'#ffda62');burst(o.x,o.y,'#ffda62');burst(o.x,o.y,'#ff7975');
+  sound('clang');vibrate(40);shake=.18;duel.freeze=0.06;
+  fanMood('cheer',1.1);fanSay(['TAK!','JEST!','BRAWO!'][Math.floor(Math.random()*3)],1.1);
+  if(boss.hp<=0){boss.defeated=true;boss.active=false;boss.say='Dobra, wygrałeś…';boss.sayT=1.6;fanMood('cheer',1.6);fanSay('ZDANE!',1.6);duel.ending=1.4;items=items.filter(i=>i.kind==='logo');sound('fanfare');}
+}
+function parry(o){
+  o.reflected=true;o.homing=true;o.age=0;o.trail=[];
+  pop(o.x,o.y,'ODBICIE ×'+multiplier());sound('clang');duel.freeze=0.05;burst(o.x,o.y,'#8bff9d');
+}
+function updateFinal(dt){
+  fan.t=Math.max(0,fan.t-dt);fan.sayT=Math.max(0,fan.sayT-dt);fan.cheerIn-=dt;
+  if(fan.t===0&&fan.mood!=='idle')fan.mood='idle';
+  if(fan.mood==='idle'&&fan.cheerIn<=0){fan.cheerIn=3+Math.random()*3;if(duel.playerHp>1)fanSay(FAN_LINES[Math.floor(Math.random()*FAN_LINES.length)],1.4);}
+  if(fan.throwT>0){fan.throwT-=dt;if(fan.throwT<=0){
+    // Piątka-życie od kibica: wolny łuk w stronę Damiana, trzeba ją złapać.
+    const x=fan.x+40,y=fan.feet-fan.h*0.6,flight=1.7,gravity=300;
+    items.push({kind:'5',gift:true,life:true,thrown:true,x,y,vx:(player.x-x)/flight,vy:(FLOOR-PLAYER_H/2-y-0.5*gravity*flight*flight)/flight,gravity,phase:0,warning:0,reflected:false,age:0});
+    fanSay('ŁAP!',1.2);sound('ding');
+  }}
+  if(duel.ending>0){duel.ending-=dt;if(duel.ending<=0){score+=Math.max(0,Math.ceil(LEVELS[level].time-elapsed))*10;finishLevel();}return;}
+  player.tilt*=Math.exp(-8*dt);
+  if(player.moving){duel.ghosts.unshift({x:player.x,dir:player.dir,life:0.22});duel.ghosts.length=Math.min(duel.ghosts.length,6);}
+  for(const g of duel.ghosts)g.life-=dt;duel.ghosts=duel.ghosts.filter(g=>g.life>0);
+  finalShot.cooldown=Math.max(0,finalShot.cooldown-dt);
+  if(!finalShot.active&&finalShot.cooldown===0&&invulnerable<INVULNERABLE-0.45&&(keys.has(' ')||firePointers.size)){
+    finalShot.active=true;finalShot.t=0;finalShot.released=false;
+  }
+  if(finalShot.active){
+    finalShot.t+=dt;
+    if(!finalShot.released&&finalShot.t>=0.24){
+      const hand=damianHand(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,true);
+      const target=aimTarget();
+      const tx=target?target.x+target.vx*0.2:hand.x,ty=target?target.y+target.vy*0.2:hand.y-500;
+      const dx=tx-hand.x,dy=ty-hand.y,length=Math.hypot(dx,dy)||1;
+      friendly.push({x:hand.x,y:hand.y,oldX:hand.x,oldY:hand.y,vx:dx/length*720,vy:dy/length*720,target,trail:[]});
+      burst(hand.x,hand.y,'#60e473');
+      finalShot.released=true;sound('throw');
+    }
+    if(finalShot.t>=0.5){finalShot.active=false;finalShot.cooldown=[0.1,0.2,0.3][difficulty];}
+  }
+  const zone=DUEL.parry[difficulty];
+  for(let i=friendly.length-1;i>=0;i--){
+    const shot=friendly[i];shot.oldX=shot.x;shot.oldY=shot.y;
+    shot.trail=shot.trail||[];shot.trail.unshift({x:shot.x,y:shot.y});shot.trail.length=Math.min(shot.trail.length,9);
+    if(shot.target&&!shot.target.reflected&&items.includes(shot.target)){
+      const dx=shot.target.x-shot.x,dy=shot.target.y-shot.y,length=Math.hypot(dx,dy)||1;
+      const blend=1-Math.exp(-10*dt);
+      shot.vx=shot.vx*(1-blend)+dx/length*720*blend;shot.vy=shot.vy*(1-blend)+dy/length*720*blend;
+    }
+    shot.x+=shot.vx*dt;shot.y+=shot.vy*dt;
+    let used=false;
+    for(let j=items.length-1;j>=0;j--){
+      const o=items[j];if((o.kind!=='1'&&o.kind!=='trap')||o.reflected||o.warning>0)continue;
+      // Ruch względny obu pocisków zapobiega przenikaniu przy małej liczbie FPS.
+      const nextX=o.x+o.vx*dt,nextY=o.y+(o.vy+(o.gravity||0)*dt)*dt;
+      if(hitSegment(shot.oldX-o.x,shot.oldY-o.y,shot.x-nextX,shot.y-nextY,-39,-44,39,44)){
+        used=true;
+        if(o.kind==='trap'){
+          items.splice(j,1);boss.hp=Math.min(boss.maxHp,boss.hp+1);duel.streak=0;
+          pop(o.x,o.y,'PUŁAPKA! Łukasz +1','#ff7975');sound('buzz');burst(o.x,o.y,'#ff7975');
+          fanMood('sad',1.2);fanSay('TO BYŁA PUŁAPKA!',1.4);boss.say='Ha!';boss.sayT=1.2;
+        }else if(Math.hypot(o.x-player.x,o.y-(FLOOR-PLAYER_H*0.6))<zone)parry(o);
+        else{used=false;if(!shot.whiffed){shot.whiffed=true;pop(o.x,o.y-40,'ZA DALEKO','#c8d5e8');}continue;}
+        break;
+      }
+    }
+    if(used||shot.y<-40||shot.y>H+60||shot.x<-60||shot.x>W+60)friendly.splice(i,1);
+    if(state!=='play')return;
+  }
+}
+function drawFan(){
+  const name=hero,label=heroLabel(),ph=duelPhase();
+  let mood=fan.mood;
+  if(mood==='idle'&&duel.playerHp===1&&duel.maxHp>1)mood='cover';
+  if(mood==='idle'&&ph===2&&!boss.defeated)mood='hide';
+  let dx=0,dy=0,rot=0,sx=1,sy=1;
+  if(mood==='idle'){dy=Math.sin(clock*6)*3;rot=Math.sin(clock*3)*0.03;}
+  if(mood==='cheer'){dy=-Math.abs(Math.sin(clock*16))*28;rot=Math.sin(clock*40)*0.08;if(Math.random()<0.5)sparks.push({x:fan.x+(Math.random()-.5)*80,y:fan.feet-fan.h,vx:(Math.random()-.5)*160,vy:-Math.random()*220,life:.5,color:'#60e473'});}
+  if(mood==='sad'){sy=0.9;dy=6;rot=0.06;}
+  if(mood==='cover'){sx=-1;dy=Math.sin(clock*8)*2;}
+  if(mood==='throw'){rot=-0.25+0.5*(1-fan.t/0.6);}
+  // Ławka, za którą kibic chowa się podczas furii.
+  ctx.save();ctx.translate(fan.x+dx,fan.feet+dy);ctx.rotate(rot);ctx.scale(sx,sy);
+  if(mood==='hide'){ctx.beginPath();ctx.rect(-fan.h,-fan.h*1.2,fan.h*2,fan.h*0.7);ctx.clip();}
+  picture(name,-fan.h/2,-fan.h,fan.h,fan.h);ctx.restore();
+  if(mood==='hide'){panel(fan.x-70,fan.feet-fan.h*0.5,140,fan.h*0.5,'#7a5230');ctx.fillStyle='#5c3d22';ctx.fillRect(fan.x-70,fan.feet-fan.h*0.5,140,10);}
+  if(mood==='throw'&&fan.throwT>0)text('5',fan.x+40,fan.feet-fan.h*0.6,26,'#60e473');
+  if(mood==='sad'){ctx.save();ctx.globalAlpha=0.6;ctx.fillStyle='#8a94a6';ctx.beginPath();ctx.ellipse(fan.x,fan.feet-fan.h-52,34,16,0,0,Math.PI*2);ctx.fill();ctx.restore();}
+  nameBadge(mood==='cover'?'NIE PATRZĘ':mood==='hide'?'SCHOWANY':label,fan.x,fan.feet-fan.h-32);
+  if(fan.sayT>0&&mood!=='cover'&&mood!=='hide'){
+    ctx.save();ctx.globalAlpha=Math.min(1,fan.sayT*3);ctx.font='700 17px Arial,sans-serif';
+    const w=ctx.measureText(fan.say).width+24,y=fan.feet-fan.h-74;
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.roundRect(fan.x-w/2,y-16,w,32,10);ctx.fill();
+    text(fan.say,fan.x,y+1,17,'#182437');ctx.restore();
+  }
+}
+function drawFinal(){
+  const target=aimTarget();
+  // Znaczniki nad pociskami: co odbić, przed czym uskoczyć, czego nie ruszać.
+  for(const o of items){
+    if(o.warning>0||o.reflected||o.kind==='logo'||o.kind==='5')continue;
+    const label=o.kind==='exam'?'USKOCZ':o.kind==='trap'?'NIE ODBIJAJ':'ODBIJ';
+    const color=o.kind==='exam'?'#fff':o.kind==='trap'?'#ff7975':'#8bff9d';
+    text(label,o.x,o.y-58,15,color);
+  }
+  if(target){ctx.save();ctx.strokeStyle='#ffda62';ctx.lineWidth=3;ctx.beginPath();ctx.ellipse(target.x,target.y,42,48,0,0,Math.PI*2);ctx.stroke();ctx.restore();}
+  for(const shot of friendly){
+    drawTrail(shot,'#60e473');
+    ctx.save();ctx.shadowColor='#60e473';ctx.shadowBlur=14;
+    ctx.font='900 36px Arial,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.strokeText('5',shot.x,shot.y);text('5',shot.x,shot.y,36,'#2ecc40');ctx.restore();
+  }
+  // Strefa odbicia — pierścień wokół Damiana.
+  ctx.save();ctx.strokeStyle='rgba(139,255,157,.22)';ctx.lineWidth=2;ctx.setLineDash([6,10]);
+  ctx.beginPath();ctx.arc(player.x,FLOOR-PLAYER_H*0.6,DUEL.parry[difficulty],0,Math.PI*2);ctx.stroke();ctx.restore();
+  if(target&&!paused){
+    const hand=damianHand(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,finalShot.active);
+    ctx.save();ctx.strokeStyle='rgba(255,218,98,.32)';ctx.setLineDash([5,10]);
+    ctx.beginPath();ctx.moveTo(hand.x,hand.y);ctx.lineTo(target.x,target.y);ctx.stroke();ctx.restore();
+  }
+}
+
+// PLAYER — fizyka niezależna od liczby klatek; hitbox to 60% sprite'a.
+function playerWidth(){
+  const img=assets[selected?'damian':hero];
+  return PLAYER_H*(ready(img)?img.naturalWidth/img.naturalHeight:0.65);
+}
+function updatePlayer(dt){
+  const left=keys.has('arrowleft')||keys.has('a')||[...pointers.values()].includes(-1);
+  const right=keys.has('arrowright')||keys.has('d')||[...pointers.values()].includes(1);
+  const dir=Number(right)-Number(left);
+  player.moving=dir!==0;if(dir)player.dir=dir;
+  player.x+=dir*470*dt+player.knock*dt;player.knock*=Math.exp(-12*dt);
+  const half=playerWidth()/2;player.x=Math.max(half,Math.min(W-half,player.x));
+  player.red=Math.max(0,player.red-dt);player.green=Math.max(0,player.green-dt);
+}
+
+// COLLISIONS — każdy obiekt jest rozliczany tylko raz.
+function collides(o){
+  const s=size(o),half=playerWidth()*.30;
+  return o.x+s.w/2>player.x-half&&o.x-s.w/2<player.x+half&&
+    o.y+s.h/2>FLOOR-PLAYER_H&&o.y-s.h/2<FLOOR;
+}
+function collect(o){
+  if(o.kind==='logo'){boost=level===4?2:BOOST_TIME;sound('powerup');vibrate(30);burst(player.x,FLOOR-80,'#ffda62');return;}
+  if(level===4){
+    // Finał: obrażenia zamiast liczenia jedynek; piątka-życie od kibica leczy.
+    if(o.kind==='5'){if(o.life){duel.playerHp=Math.min(duel.maxHp,duel.playerHp+1);duel.hitStreak=0;pop(player.x,FLOOR-PLAYER_H,'+1 od kibica','#60e473');sound('ding');burst(o.x,o.y,'#2ecc40');fanMood('cheer',1);}return;}
+    if(o.kind==='trap'){score+=50;pop(o.x,o.y,'+50 (pułapka ominięta)','#8bff9d');sound('ding');burst(o.x,o.y,'#8bff9d');return;}
+    damagePlayer(o.kind==='exam'?2:1,o);return;
+  }
+  if(o.kind==='5'){
+    fives++;combo++;const gain=100+Math.min(combo-1,5)*20;score+=gain;pop(o.x,o.y,'+'+gain,'#60e473');player.green=.15;sound('ding');burst(o.x,o.y,'#2ecc40');
+    if(fives>=LEVELS[level].target)finishLevel();
+  }else{
+    if(invulnerable>0)return;
+    ones++;combo=0;pop(player.x,FLOOR-PLAYER_H,'TRAFIENIE','#ff7975');invulnerable=INVULNERABLE;player.red=.3;shake=.22;
+    if(ones===2)announce('Zagrożenie! Jeszcze jedna jedynka i poprawka.');
+    player.knock=(player.x>=o.x?1:-1)*450;sound('buzz');vibrate(ones===3?[80,60,160]:60);burst(o.x,o.y,'#e5322d');
+    if(ones===3)failLevel('Trzy jedynki — czas na poprawkę.');
+  }
+}
+function update(dt){
+  for(const f of fx){f.life-=dt;if(f.kind==='marker'){f.x+=f.vx*dt;f.y+=f.vy*dt;f.vy+=900*dt;f.rot+=9*dt;}}fx=fx.filter(f=>f.life>0);
+  invulnerable=Math.max(0,invulnerable-dt);noticeTime=Math.max(0,noticeTime-dt);
+  updatePlayer(dt);boost=Math.max(0,boost-dt);shake=Math.max(0,shake-dt);
+  const old=Math.floor(elapsed);elapsed+=dt;score+=Math.floor(elapsed)-old;
+  if(elapsed>=LEVELS[level].time&&!(level===4&&(duel.ending>0||boss.defeated))){failLevel(level===4?'Koniec czasu! Łukasz utrzymał argumenty — powtórka.':'Koniec czasu! Nie udało się zebrać wymaganych piątek.');return;}
+  if(level>=3)updateBoss(dt);
+  if(level>=1&&level<=3)updateTeacher(dt);
+  if(examQueue>0){examIn-=dt;if(examIn<=0){spawn('exam',true);examQueue--;examIn+=0.55;}}
+  spawnIn-=dt;boostIn-=dt;
+  if(level!==4&&spawnIn<=0){spawn();spawnIn+=LEVELS[level].interval;}
+  if(boostIn<=0){spawn('logo');boostIn+=level===4?DUEL.logoEvery:BOOST_EVERY;}
+  if(level===4){updateFinal(dt);if(state!=='play')return;}
+  for(let i=items.length-1;i>=0;i--){
+    const o=items[i];
+    // Sprawdzian czeka nieruchomo na końcu ostrzeżenia; nie ma jeszcze kolizji.
+    if(o.warning>0){o.warning=Math.max(0,o.warning-dt);continue;}
+    if(boost>0&&o.kind==='5'&&!o.reflected){
+      const dx=player.x-o.x,dy=FLOOR-PLAYER_H/2-o.y,dist=Math.hypot(dx,dy);
+      if(dist<MAGNET){const speed=650;o.vx=dx/Math.max(dist,1)*speed;o.vy=dy/Math.max(dist,1)*speed;}
+    }
+    if(o.thrown){o.trail=o.trail||[];o.trail.unshift({x:o.x,y:o.y});o.trail.length=Math.min(o.trail.length,8);o.age=(o.age||0)+dt;}
+    if(o.homing){
+      // Odbita jedynka leci do tułowia Łukasza i zabiera mu punkt argumentów.
+      const t=bossTorso(),dx=t.x-o.x,dy=t.y-o.y,d=Math.hypot(dx,dy)||1;
+      o.vx=dx/d*760;o.vy=dy/d*760;
+      if(d<55){items.splice(i,1);if(!boss.defeated)bossHit(o);if(state!=='play')return;if(boss.defeated)break;continue;}
+    }
+    if(o.thrown&&!o.reflected)o.vy+=o.gravity*dt;
+    o.x+=o.vx*dt;o.y+=o.vy*dt;
+    const half=size(o).w/2;
+    if(!o.thrown&&o.x<half){o.x=half;o.vx=Math.abs(o.vx);}
+    if(!o.thrown&&o.x>W-half){o.x=W-half;o.vx=-Math.abs(o.vx);}
+    if(!o.reflected&&collides(o)){
+      if(boost>0&&(o.kind==='1'||o.kind==='exam')){
+        o.reflected=true;o.vy=-420;o.vx=(o.x<player.x?-1:1)*260;sound('clang');
+        if(level===4){o.homing=true;o.trail=[];pop(o.x,o.y,'TARCZA — ODBICIE');}
+        burst(o.x,o.y,'#ffda62');
+      }else{items.splice(i,1);collect(o);if(state!=='play')return;}
+    }else if(o.kind==='5'&&o.y-size(o).h/2>FLOOR){
+      // Piątka minęła stopy — odejmujemy postęp tylko raz, bez wartości ujemnych.
+      if(!o.gift){fives=Math.max(0,fives-1);announce('Uciekła piątka! −1 do postępu klasy.');}
+      items.splice(i,1);
+    }else if(o.x<-150||o.x>W+150||o.y>H+120||(o.reflected&&!o.homing&&o.y<-120))items.splice(i,1);
+  }
+  for(const p of sparks){p.life-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=300*dt;}
+  sparks=sparks.filter(p=>p.life>0);
+}
+
+// RENDER — wszystkie pozycje mają stały układ 1280×720.
+function text(value,x,y,size=26,color='#fff',align='center'){
+  ctx.fillStyle=color;ctx.font=`700 ${size}px Arial,sans-serif`;
+  ctx.textAlign=align;ctx.textBaseline='middle';ctx.fillText(value,x,y);
+}
+function panel(x,y,w,h,color='rgba(9,19,39,.94)'){
+  ctx.fillStyle=color;ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle='rgba(255,255,255,.16)';ctx.lineWidth=2;ctx.strokeRect(x,y,w,h);
+}
+function background(){
+  const img=assets.bg;ctx.save();ctx.filter=`brightness(${LEVELS[level].brightness})`;
+  if(ready(img)){
+    const s=Math.max(W/img.naturalWidth,H/img.naturalHeight);
+    ctx.drawImage(img,(W-img.naturalWidth*s)/2,(H-img.naturalHeight*s)/2,img.naturalWidth*s,img.naturalHeight*s);
+  }else{
+    const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#639dd0');g.addColorStop(1,'#dbe9ee');
+    ctx.fillStyle=g;ctx.fillRect(0,0,W,H);ctx.fillStyle='#818998';ctx.fillRect(0,FLOOR,W,H-FLOOR);
+  }
+  ctx.restore();if(level>=2){ctx.fillStyle='rgba(25,63,133,.27)';ctx.fillRect(0,0,W,H);}
+}
+function drawPlayer(){
+  if(level===4){
+    // Smuga uniku — półprzezroczyste klatki za Damianem.
+    for(const g of duel.ghosts){ctx.save();ctx.globalAlpha=g.life*0.9;ctx.translate(g.x,FLOOR);ctx.scale(g.dir,1);picture('damian',-PLAYER_H/2,-PLAYER_H,PLAYER_H,PLAYER_H);ctx.restore();}
+    drawDamian(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,finalShot.active,true);return;
+  }
+  const w=playerWidth(),bounce=player.moving?Math.sin(clock*19)*4:0;
+  ctx.save();ctx.translate(player.x,FLOOR+bounce);
+  ctx.rotate(player.moving?player.dir*8*Math.PI/180:0);
+  ctx.scale(player.dir,1);
+  if(invulnerable>0)ctx.globalAlpha=Math.sin(clock*35)>0?0.4:1;
+  if(player.green>0)ctx.scale(1.15,1.15);
+  if(boost>0||player.red>0||player.green>0){
+    ctx.shadowColor=player.red>0?'#ff2020':player.green>0?'#2ecc40':'#ffd65a';ctx.shadowBlur=24;
+  }
+  if(player.red>0)ctx.filter='sepia(1) saturate(8) hue-rotate(315deg)';
+  if(player.green>0)ctx.filter='sepia(1) saturate(4) hue-rotate(65deg)';
+  picture(selected?'damian':hero,-w/2,-PLAYER_H,w,PLAYER_H);ctx.restore();
+}
+function drawTrail(o,color){
+  if(!o.trail||o.trail.length<2)return;
+  ctx.save();ctx.lineCap='round';
+  for(let i=1;i<o.trail.length;i++){
+    ctx.globalAlpha=(1-i/o.trail.length)*0.5;ctx.strokeStyle=color;ctx.lineWidth=(1-i/o.trail.length)*9;
+    ctx.beginPath();ctx.moveTo(o.trail[i-1].x,o.trail[i-1].y);ctx.lineTo(o.trail[i].x,o.trail[i].y);ctx.stroke();
+  }ctx.restore();
+}
+function drawEffects(){
+  for(const f of fx){
+    if(f.kind==='marker'){ctx.save();ctx.globalAlpha=Math.min(1,f.life*2);ctx.translate(f.x,f.y);ctx.rotate(f.rot);ctx.fillStyle='#1d1d1d';ctx.fillRect(-16,-4,32,8);ctx.fillStyle='#e5322d';ctx.fillRect(10,-4,6,8);ctx.restore();continue;}
+    ctx.save();ctx.globalAlpha=Math.min(1,f.life*3);
+    text(f.label,f.x,f.y-(1-f.life/f.maxLife)*45,24,f.color);
+    ctx.strokeStyle=f.color;ctx.lineWidth=2;ctx.globalAlpha=f.life/f.maxLife*0.5;
+    ctx.beginPath();ctx.arc(f.x,f.y,12+(1-f.life/f.maxLife)*48,0,Math.PI*2);ctx.stroke();ctx.restore();
+  }
+}
+function drawItem(o){
+  drawTrail(o,o.kind==='5'?'#60e473':o.homing?'#ffda62':o.kind==='trap'?'#c2ff90':'#ff5a50');
+  if(o.warning>0){
+    ctx.save();ctx.globalAlpha=0.75+0.25*Math.sin(clock*20);
+    const x=Math.max(105,Math.min(W-105,o.x));
+    panel(x-95,100,190,60,'#8e251f');text('! SPRAWDZIAN',x,130,21,'#fff');
+    ctx.restore();return;
+  }
+  ctx.save();ctx.translate(o.x,o.y);ctx.rotate(Math.sin(clock*2+o.phase)*Math.PI/12);
+  if(o.kind==='logo'){
+    ctx.shadowColor='#ffd65a';ctx.shadowBlur=18+8*Math.sin(clock*5);logo(0,-35,70);
+  }else if(o.kind==='exam'){
+    panel(-75,-32,150,64,'#fff');text('SPRAWDZIAN',0,-11,16,'#182437');text('NIEZAL.',0,14,20,'#e5322d');
+  }else{
+    ctx.font='900 64px Arial,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.shadowColor='rgba(0,0,0,.4)';ctx.shadowBlur=6;ctx.shadowOffsetY=3;
+    ctx.lineWidth=4;ctx.strokeStyle='#fff';ctx.strokeText(o.kind,0,0);
+    if(o.kind==='trap'){ctx.strokeStyle='#e5322d';ctx.lineWidth=7;ctx.strokeText('5',0,0);ctx.fillStyle='#2ecc40';ctx.fillText('5',0,0);}
+    else{ctx.fillStyle=o.kind==='5'?'#2ecc40':'#e5322d';ctx.fillText(o.kind,0,0);}
+  }ctx.restore();
+}
+function hpBar(x,y,w,hp,max,color,rightToLeft){
+  const seg=(w-4*(max-1))/max;
+  for(let i=0;i<max;i++){const on=i<hp,xx=rightToLeft?x+w-(i+1)*seg-i*4:x+i*(seg+4);ctx.fillStyle=on?color:'#344054';ctx.fillRect(xx,y,seg,16);}
+}
+function drawDuelHUD(){
+  panel(0,0,W,92,'rgba(8,17,34,.91)');
+  text('KLASA 5 · RADA',24,30,24,'#ffda62','left');
+  text('DAMIAN',250,30,22,'#60e473','left');hpBar(345,22,260,duel.playerHp,duel.maxHp,'#60e473',false);
+  text('ŁUKASZ',1030,30,22,'#ff7975','right');hpBar(660,22,260,boss.hp,boss.maxHp,'#ff5a50',true);
+  text('Seria odbić: '+duel.streak+' · ×'+multiplier(),640,70,19,multiplier()>=3?'#ffda62':'#c8d5e8');
+  text(boost>0?'TARCZA':'BOOSTER',24,70,16,'#ffda62','left');
+  ctx.fillStyle='#344054';ctx.fillRect(110,61,180,14);ctx.fillStyle='#ffda62';ctx.fillRect(110,61,180*boost/2,14);
+  text('Punkty: '+score,1030,70,20,'#fff','right');
+  panel(pauseBox.x,pauseBox.y,pauseBox.w,pauseBox.h);text('Ⅱ',1141,41,27);
+}
+function drawHUD(){
+  if(level===4)return drawDuelHUD();
+  panel(0,0,W,92,'rgba(8,17,34,.91)');
+  text('KLASA '+(level+1),24,30,26,'#ffda62','left');
+  text((level===4?'Uczniowie ':'Piątki ')+fives+' / '+LEVELS[level].target,220,30,25,'#60e473','left');
+  text((level===4?'Trafienia ':'Jedynki ')+('●'.repeat(ones)+'○'.repeat(3-ones)),470,30,25,'#ff7975','left');
+  text('Punkty: '+score,760,30,26,'#fff','left');
+  text(boost>0?(level===4?'TARCZA':'TARCZA + MAGNES'):'BOOSTER',24,70,16,'#ffda62','left');
+  ctx.fillStyle='#344054';ctx.fillRect(220,61,500,14);
+  ctx.fillStyle='#ffda62';ctx.fillRect(220,61,500*boost/BOOST_TIME,14);
+  text(boost>0?boost.toFixed(1)+' s':'Złap logo szkoły',745,69,17,'#c8d5e8','left');
+  text(level===4?'RZUT: piątka do ucznia z napisem CEL':'Seria: '+combo+' · następna 5: +'+(100+Math.min(combo,5)*20),920,70,15,'#7ced8b','left');
+  panel(pauseBox.x,pauseBox.y,pauseBox.w,pauseBox.h);text('Ⅱ',1141,41,27);
+}
+function button(label,y=600){panel(390,y-28,500,56,'#d7b14d');text(label,W/2,y,24,'#101b30');}
+
+// UI — menu pozostaje czytelne także wtedy, gdy brakuje wszystkich grafik.
+function drawUI(){
+  if(state==='play'){
+    drawHUD();
+    panel(14,654,320,50);
+    text('Czas: '+Math.max(0,Math.ceil(LEVELS[level].time-elapsed))+' s',174,679,23,LEVELS[level].time-elapsed<=10?'#ff7975':'#ffda62');
+    if(level===4){
+      if(elapsed<8)text('Odbijaj jedynki, gdy są w pierścieniu · uskakuj przed sprawdzianem',670,680,17,'#ffda62');
+      panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,firePointers.size?'#307940':'#1c5930');
+      text('ODBIJ · SPACJA',1135,669,23,'#fff');
+    }
+    if(noticeTime>0){panel(300,102,680,44);text(notice,640,124,21,'#ffda62');}
+    if(paused){panel(290,240,700,230);text('PAUZA',640,300,48,'#ffda62');text('P / Enter / dotknij, aby wrócić',640,370,25);}
+  }else{
+    ctx.fillStyle='rgba(4,12,28,.78)';ctx.fillRect(0,0,W,H);
+    if(state==='title'){
+      logo(640,36,104);text('RUSZKOWSKI: ZDAJ ALBO POWTARZAJ',640,185,42,'#ffda62');
+      text('Dzień Programisty 2026 · ZSZ im. Jana Ruszkowskiego w Pułtusku',640,238,23);
+      panel(250,292,780,204);
+      text('Zbieraj zielone 5 — osiągnij cel przed końcem czasu.',640,338,25,'#7ced8b');
+      text('Unikaj czerwonych 1 — trzy jedynki to powtórka.',640,393,25,'#ff9690');
+      text('Logo = 3 s tarczy · przepuszczona piątka: −1.',640,448,25,'#ffda62');
+      text('Pięć klas — w finale pojedynek z Łukaszem',640,525,24,'#ffda62');
+      text('Piątki w serii: +100 do +200 pkt · jedynka zeruje serię',640,558,18,'#c3d0e2');
+      button('Naciśnij Enter / dotknij ekranu');
+      text('← → lub A/D: ruch · P: pauza · R: restart · M: dźwięk',640,664,20,'#c3d0e2');
+    }else if(state==='difficulty'){
+      text('Wybierz trudność',640,140,46,'#ffda62');
+      text('← → i Enter lub dotknij wybranej karty',640,205,24);
+      difficultyCards.forEach((r,i)=>{
+        const d=DIFFICULTIES[i];
+        panel(r.x,r.y,r.w,r.h,i===difficulty?'#34466c':'#14233d');
+        ctx.strokeStyle=i===difficulty?'#ffda62':'#697995';ctx.lineWidth=4;ctx.strokeRect(r.x,r.y,r.w,r.h);
+        text(d.name,r.x+r.w/2,r.y+48,34,i===difficulty?'#ffda62':'#fff');
+        text('Klasy 1–4: '+d.targets.slice(0,4).join(' / '),r.x+r.w/2,r.y+102,17);
+        text('Finał: '+DUEL.hp[i]+' vs '+DUEL.bossHp[i]+' argumentów',r.x+r.w/2,r.y+134,20);
+        text('Czas finału: '+d.times[4]+' s',r.x+r.w/2,r.y+169,18);
+        text(['Wolniej, więcej piątek','Wyważone tempo','Szybciej, dłuższe serie'][i],r.x+r.w/2,r.y+208,19,'#cbd7e7');
+      });text('Pięć klas · Damian pomaga · Łukasz w każdym trybie',640,560,21,'#ffda62');button('Enter — dalej',610);
+    }else if(state==='character'){
+      text('Kim grasz w klasach 1–4?',640,110,44,'#ffda62');
+      text('← → i Enter lub dotknij karty · w finale ta postać kibicuje Damianowi',640,160,21);
+      characterCards.forEach((r,i)=>{
+        const name=i?'uczennica':'uczen',on=hero===name;
+        panel(r.x,r.y,r.w,r.h,on?'#34466c':'#14233d');
+        ctx.strokeStyle=on?'#ffda62':'#697995';ctx.lineWidth=4;ctx.strokeRect(r.x,r.y,r.w,r.h);
+        ctx.save();ctx.translate(r.x+r.w/2,r.y+270);if(on)ctx.scale(1.05+0.02*Math.sin(clock*5),1.05+0.02*Math.sin(clock*5));
+        picture(name,-120,-240,240,240);ctx.restore();
+        text(i?'Uczennica':'Uczeń',r.x+r.w/2,r.y+320,32,on?'#ffda62':'#fff');
+      });
+      button('Enter — zaczynamy',620);
+    }else if(state==='briefing'){
+      const final=level===4;
+      text(final?'Klasa 5 — Rada pedagogiczna':'Klasa '+(level+1),640,132,42,'#ffda62');
+      picture(final?'damian':hero,160,235,250,250);
+      text(final?'Grasz Damianem — nauczycielem':(fem()?'Grasz uczennicą':'Grasz uczniem'),815,250,29);
+      const lines=final?
+        ['Rada pedagogiczna: Ty kontra Łukasz, pasek na pasek.',
+         'Jedynkę odbij piątką, gdy jest blisko — wraca do niego.',
+         'Sprawdzianu nie odbijesz: uskocz. Pułapki nie ruszaj.',
+         'Seria odbić ×2, ×3. Kibic w kryzysie rzuci Ci piątkę.']:
+        ['Zbieraj piątki i unikaj jedynek.',
+         'Damian pomaga: patroluje i rzuca Ci piątki.',
+         level===3?'Łukasz celuje w Ciebie — unikaj jego rzutów.':'Trzy jedynki oznaczają powtórkę klasy.',
+         'Piątki od Damiana nie karzą za nieudany chwyt.'];
+      lines.forEach((line,i)=>text(line,815,315+i*44,21,'#d2dfed'));
+      if(final){
+        // Legenda pocisków: odbij / uskocz / nie odbijaj.
+        [['1','#e5322d','ODBIJ','#8bff9d'],['SPR.','#fff','USKOCZ','#fff'],['5','#2ecc40','NIE ODBIJAJ','#ff7975']].forEach(([g,c,l,lc],i)=>{
+          const x=440+i*200;panel(x-70,478,140,64,'rgba(9,19,39,.8)');
+          ctx.font='900 34px Arial,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';ctx.lineWidth=i===2?6:3;ctx.strokeStyle=i===2?'#e5322d':'#fff';ctx.strokeText(g,x,498);ctx.fillStyle=c;ctx.fillText(g,x,498);
+          text(l,x,528,14,lc);
+        });
+      }
+      text(final?'Cel: wyzeruj '+DUEL.bossHp[difficulty]+' argumentów Łukasza w '+LEVELS[level].time+' s':
+        'Cel: '+LEVELS[level].target+' piątek w '+LEVELS[level].time+' s',640,final?570:550,26,'#ffda62');
+      button('Enter / dotknij — zaczynamy',620);
+    }else if(state==='win'){
+      panel(220,95,840,540,'rgba(248,242,220,.97)');logo(640,115,75);
+      text(fem()?'ZDAŁAŚ!':'ZDAŁEŚ!',640,242,55,'#162743');
+      text('Pięć klas — misja ukończona!',640,306,35,'#162743');
+      text('Świadectwo z wyróżnieniem · ZSZ w Pułtusku',640,360,24,'#44506a');
+      if(retried)text('Poprawka zaliczona!',640,395,22,'#317844');
+      text('Wynik: '+score,640,435,34,'#162743');
+      text('Rekord ('+DIFFICULTIES[difficulty].name+'): '+best,640,488,25,'#44506a');button('Od nowa',570);
+    }else{
+      panel(200,215,880,320);
+      text(state==='repeat'?'Powtarzasz klasę!':(fem()?'Zdałaś! ':'Zdałeś! ')+'Promocja do klasy '+(level+2),640,280,42,state==='repeat'?'#ff8d85':'#81eb91');
+      if(state==='promotion'&&retried)text('Poprawka zaliczona!',640,318,21,'#ffda62');
+      text('Wynik: '+score,640,350,31);
+      text(state==='repeat'?failure:ones===0?'Bez jedynki! Premia +500 punktów.':'Kolejna klasa czeka.',640,412,23,'#cbd7e7');
+      button('Enter / dotknij — dalej',490);
+    }
+  }
+  panel(muteBox.x,muteBox.y,muteBox.w,muteBox.h);
+  text(muted?'M ×':'M ♪',1226,41,22,muted?'#ff9690':'#ffda62');
+}
+function render(){
+  ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);ctx.clearRect(0,0,W,H);
+  ctx.save();
+  if(shake>0&&state==='play'&&!paused)ctx.translate((Math.random()-.5)*12,(Math.random()-.5)*12);
+  background();
+  if(state==='play'){
+    if(level===4)drawFan();
+    if(level>=3)drawBoss();
+    if(level>=1&&level<=3)drawTeacher();
+    if(level===4)drawFinal();
+    items.forEach(drawItem);drawPlayer();drawEffects();
+    for(const p of sparks){ctx.globalAlpha=p.life/.5;ctx.fillStyle=p.color;ctx.fillRect(p.x,p.y,5,5);}ctx.globalAlpha=1;
+  }
+  ctx.restore();drawUI();
+}
+let last=0;
+function frame(now){
+  const dt=last?Math.min((now-last)/1000,.05):0;last=now;menuAge+=dt;
+  if(state==='play'&&level===4&&duel.freeze>0&&!paused){duel.freeze-=dt;render();requestAnimationFrame(frame);return;}
+  if(!paused){clock+=dt;if(state==='play')update(dt);}
+  render();requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
