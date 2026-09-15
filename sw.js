@@ -1,6 +1,6 @@
 // Service worker — gra działa offline po pierwszym otwarciu.
 // Po każdej aktualizacji gry zmień CACHE (np. v2 → v3), aby telefony pobrały nowe pliki.
-const CACHE = 'ruszkowski-v2';
+const CACHE = 'ruszkowski-v3';
 const FILES = [
   './', './index.html', './manifest.webmanifest',
   './assets/damian.png', './assets/uczen.png', './assets/logo.png', './assets/bg.png', './assets/pan-d.png', './assets/uczennica.png',

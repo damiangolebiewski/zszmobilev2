@@ -77,7 +77,10 @@ function applyDifficulty(){
 }
 const W=1280, H=720, FLOOR=H*0.85, PLAYER_H=H*0.22;
 const BOOST_TIME=3, BOOST_EVERY=20, BOOST_FIRST=9, MAGNET=150;
-const EXAM_WARNING=0.7, INVULNERABLE=0.8;
+const EXAM_WARNING=0.7, INVULNERABLE=1.2;
+// SKOK — wysokość ~1,2 postaci, ok. 0,55 s w powietrzu. Feet = FLOOR - player.jumpY.
+const JUMP_V=1330, JUMP_G=4800;
+function feetY(){return FLOOR-player.jumpY;}
 // Nowa wersja punktacji ma osobny rekord; brak dostępu do zapisu nie blokuje gry.
 // Każdy tryb ma osobny rekord, również gdy zapis jest zablokowany.
 function readBest(){
@@ -144,15 +147,16 @@ let items=[],sparks=[],shake=0,clock=0,paused=false,menuAge=0;
 let examQueue=0,examIn=0,failure='';
 let combo=0,invulnerable=0,retried=false,notice='',noticeTime=0;
 function announce(message){notice=message;noticeTime=2.5;}
-const player={x:W/2,dir:1,moving:false,red:0,green:0,knock:0};
-function clearInput(){keys.clear();pointers.clear();firePointers.clear();player.moving=false;}
+const player={x:W/2,dir:1,moving:false,red:0,green:0,knock:0,jumpY:0,vy:0,air:false,squash:0,axis:0};
+function jump(){if(state!=='play'||paused||player.air)return;player.air=true;player.vy=JUMP_V;player.squash=0.12;sound('jump');}
+function clearInput(){keys.clear();pointers.clear();firePointers.clear();stick.id=null;player.moving=false;player.axis=0;}
 function menu(next){state=next;menuAge=0;clearInput();}
 function startLevel(){
   score=checkpoint;fives=0;ones=0;elapsed=0;boost=0;
   examQueue=0;examIn=0;failure='';
   combo=0;invulnerable=0;notice='';noticeTime=0;
   spawnIn=0.8;boostIn=BOOST_FIRST;items=[];sparks=[];shake=0;
-  Object.assign(player,{x:W/2,dir:1,moving:false,red:0,green:0,knock:0});
+  Object.assign(player,{x:W/2,dir:1,moving:false,red:0,green:0,knock:0,jumpY:0,vy:0,air:false,squash:0,axis:0});
   selected=level===4?1:0;
   resetTeacher();resetFinal();resetBoss();
   paused=false;clearInput();state='play';
@@ -178,7 +182,11 @@ function togglePause(){if(state==='play'){paused=!paused;clearInput();}}
 
 // INPUT — Pointer Events obsługują także kilka palców naraz.
 const keys=new Set(),pointers=new Map(),firePointers=new Set();
-const fireBox={x:1010,y:632,w:250,h:74};
+const fireBox={x:1010,y:612,w:250,h:94};
+// JOYSTICK — pojawia się w miejscu dotyku lewej połowy; w bok ruch, pchnięcie w górę skok (raz na pchnięcie).
+const stick={id:null,ox:0,oy:0,x:0,y:0,jumped:false};
+const STICK_DEAD=12,STICK_FULL=40,STICK_JUMP=45;
+function actionLabel(){return level===4?'ODBIJ':'SKOK';}
 function point(e){const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};}
 function inside(p,r){return p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h;}
 const muteBox={x:1190,y:14,w:72,h:54},pauseBox={x:1105,y:14,w:72,h:54};
@@ -186,7 +194,7 @@ const difficultyCards=[{x:115,y:260,w:330,h:270},{x:475,y:260,w:330,h:270},{x:83
 const characterCards=[{x:270,y:190,w:320,h:360},{x:690,y:190,w:320,h:360}];
 window.addEventListener('keydown',e=>{
   const k=e.key.toLowerCase();
-  if(['arrowleft','arrowright','a','d','enter','p','r','m',' '].includes(k))e.preventDefault();
+  if(['arrowleft','arrowright','arrowup','a','d','w','enter','p','r','m',' '].includes(k))e.preventDefault();
   unlockAudio();
   if(e.repeat)return;
   keys.add(k);
@@ -198,6 +206,7 @@ window.addEventListener('keydown',e=>{
   }
   if(state==='character'&&['arrowleft','a','arrowright','d'].includes(k))setHero(['arrowleft','a'].includes(k)?'uczen':'uczennica');
   if(k==='enter'){if(paused)togglePause();else advance();}
+  if(state==='play'&&!paused&&(k==='arrowup'||k==='w'||(k===' '&&level!==4)))jump();
 });
 window.addEventListener('keyup',e=>keys.delete(e.key.toLowerCase()));
 canvas.addEventListener('pointerdown',e=>{
@@ -205,8 +214,8 @@ canvas.addEventListener('pointerdown',e=>{
   if(inside(p,muteBox)){muted=!muted;return;}
   if(state==='play'){
     if(inside(p,pauseBox)||paused){togglePause();return;}
-    if(level===4&&inside(p,fireBox))firePointers.add(e.pointerId);
-    else pointers.set(e.pointerId,p.x<W/2?-1:1);
+    if(inside(p,fireBox)){if(level===4)firePointers.add(e.pointerId);else jump();}
+    else if(p.x<W/2&&stick.id===null){Object.assign(stick,{id:e.pointerId,ox:p.x,oy:p.y,x:p.x,y:p.y,jumped:false});}
     try{canvas.setPointerCapture(e.pointerId);}catch{}
   }else if(state==='difficulty'){
     if(menuAge<0.2)return;
@@ -221,10 +230,14 @@ canvas.addEventListener('pointerdown',e=>{
   }else advance();
 });
 canvas.addEventListener('pointermove',e=>{
-  if(pointers.has(e.pointerId))pointers.set(e.pointerId,point(e).x<W/2?-1:1);
+  if(stick.id!==e.pointerId)return;
+  const p=point(e);stick.x=p.x;stick.y=p.y;
+  const dy=stick.y-stick.oy;
+  if(dy<-STICK_JUMP&&!stick.jumped){stick.jumped=true;jump();}
+  if(dy>-20)stick.jumped=false;
 });
 for(const event of ['pointerup','pointercancel','lostpointercapture'])
-  canvas.addEventListener(event,e=>{pointers.delete(e.pointerId);firePointers.delete(e.pointerId);});
+  canvas.addEventListener(event,e=>{pointers.delete(e.pointerId);firePointers.delete(e.pointerId);if(stick.id===e.pointerId)stick.id=null;});
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 window.addEventListener('blur',()=>{clearInput();if(state==='play')paused=true;});
 document.addEventListener('visibilitychange',()=>{if(document.hidden){clearInput();if(state==='play')paused=true;}});
@@ -251,6 +264,7 @@ function tone(freq,delay,duration,type='sine',end=freq){
 function sound(kind){
   if(kind==='ding'){tone(880,0,0.15);tone(1320,0.08,0.22);}
   if(kind==='throw')tone(420,0,0.14,'triangle',110);
+  if(kind==='jump')tone(300,0,0.12,'triangle',620);
   if(kind==='buzz')tone(150,0,0.25,'sawtooth',65);
   if(kind==='clang'){tone(1600,0,0.16,'triangle',600);tone(2230,0,0.10);}
   if(kind==='fanfare')[523,659,784,1047].forEach((f,i)=>tone(f,i*0.12,0.25,'triangle'));
@@ -304,14 +318,15 @@ function bossHand(){
 function throwOne(){
  const hand=bossHand();
  const variant=boss.plan[boss.shots]||'normal';
- let flight=[1.2,0.85,0.68][difficulty],gravity=440,kind='1';
+ // Klasa 4: wolniejszy, stromy łuk — wąska strefa rażenia, da się odejść w obie strony lub przeskoczyć.
+ let flight=level===3?[1.4,1.1,1.0][difficulty]:[1.2,0.85,0.68][difficulty],gravity=level===3?1400:440,kind='1';
  if(variant==='flat'){gravity=150;flight*=0.8;}
  if(variant==='arc'){gravity=950;flight*=1.3;}
  if(variant==='exam'){kind='exam';}
  if(variant==='examArc'){kind='exam';gravity=950;flight*=1.3;}
  if(variant==='trap'){kind='trap';gravity=Math.random()<0.5?150:950;flight*=gravity>500?1.3:0.8;}
- const offset=(boss.shots%2===0?-1:1)*(difficulty===2?55:35);
- const target=Math.max(80,Math.min(W-80,boss.aimX+offset));
+ // Cała seria leci w jeden punkt — kto po „!” odejdzie o szerokość postaci, jest bezpieczny.
+ const target=boss.aimX;
  items.push({kind,x:hand.x,y:hand.y,vx:(target-hand.x)/flight,
   vy:(FLOOR-PLAYER_H/2-hand.y-0.5*gravity*flight*flight)/flight,
   gravity,phase:0,reflected:false,warning:0,thrown:true,age:0});
@@ -347,15 +362,18 @@ function updateBoss(dt){
   const step=Math.max(-100*dt,Math.min(100*dt,destination-boss.x));
   boss.x+=step;boss.moving=Math.abs(step)>0.2;
   boss.face=player.x<boss.x?1:-1;
-  if(boss.wait<=0){boss.active=true;boss.moving=false;boss.t=0;boss.shots=0;boss.aimX=player.x;boss.plan=planSeries();}
+  // Nowa seria dopiero, gdy poprzednie pociski wylądowały; przy ścianie cel przesuwa się ku środkowi.
+  const inFlight=items.some(o=>o.thrown&&!o.gift&&!o.reflected);
+  if(boss.wait<=0&&!inFlight){boss.active=true;boss.moving=false;boss.t=0;boss.shots=0;
+   let aim=player.x;if(aim<170)aim+=90;if(aim>W-170)aim-=90;boss.aimX=Math.max(80,Math.min(W-80,aim));boss.plan=planSeries();}
   return;
  }
- boss.t+=dt*(difficulty===0?0.65:1)*(level===4&&ph===2?1.6:1);
+ boss.t+=dt*(difficulty===0?0.65:1);
  const count=level===4?boss.plan.length:DIFFICULTIES[difficulty].series;
  const gap=boss.plan.double?0.05:0.13;
  // Cel zostaje ustalony podczas zamachu. Jedynki nie śledzą gracza w locie.
  while(boss.shots<count&&boss.t>=0.52+boss.shots*gap)throwOne();
- if(boss.t>=1.04){boss.active=false;let wait=[1.1,0.32,0.10][difficulty];
+ if(boss.t>=1.04){boss.active=false;let wait=level===3?[2.0,1.2,1.0][difficulty]:[1.1,0.4,0.5][difficulty];
   if(level===4)wait=ph===0?wait*1.5+1.0:ph===1?wait+0.7:wait*0.7+0.3;boss.wait=wait;}
 }
 function bossPath(points){ctx.moveTo(points[0][0],points[0][1]);for(const p of points.slice(1))ctx.lineTo(p[0],p[1]);ctx.closePath();}
@@ -533,7 +551,7 @@ function aimTarget(){
   let target=null,bestD=420;
   for(const o of items){
     if(o.warning>0||o.reflected||(o.kind!=='1'&&o.kind!=='trap'))continue;
-    const d=Math.hypot(o.x-player.x,o.y-(FLOOR-PLAYER_H*0.6));
+    const d=Math.hypot(o.x-player.x,o.y-(feetY()-PLAYER_H*0.6));
     if(d<bestD){target=o;bestD=d;}
   }
   return target;
@@ -573,7 +591,7 @@ function updateFinal(dt){
   }}
   if(duel.ending>0){duel.ending-=dt;if(duel.ending<=0){score+=Math.max(0,Math.ceil(LEVELS[level].time-elapsed))*10;finishLevel();}return;}
   player.tilt*=Math.exp(-8*dt);
-  if(player.moving){duel.ghosts.unshift({x:player.x,dir:player.dir,life:0.22});duel.ghosts.length=Math.min(duel.ghosts.length,6);}
+  if(player.moving||player.air){duel.ghosts.unshift({x:player.x,y:feetY(),dir:player.dir,life:0.22});duel.ghosts.length=Math.min(duel.ghosts.length,6);}
   for(const g of duel.ghosts)g.life-=dt;duel.ghosts=duel.ghosts.filter(g=>g.life>0);
   finalShot.cooldown=Math.max(0,finalShot.cooldown-dt);
   if(!finalShot.active&&finalShot.cooldown===0&&invulnerable<INVULNERABLE-0.45&&(keys.has(' ')||firePointers.size)){
@@ -582,7 +600,7 @@ function updateFinal(dt){
   if(finalShot.active){
     finalShot.t+=dt;
     if(!finalShot.released&&finalShot.t>=0.24){
-      const hand=damianHand(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,true);
+      const hand=damianHand(player.x,feetY(),PLAYER_H,player.dir,finalShot.t,true);
       const target=aimTarget();
       const tx=target?target.x+target.vx*0.2:hand.x,ty=target?target.y+target.vy*0.2:hand.y-500;
       const dx=tx-hand.x,dy=ty-hand.y,length=Math.hypot(dx,dy)||1;
@@ -613,7 +631,7 @@ function updateFinal(dt){
           items.splice(j,1);boss.hp=Math.min(boss.maxHp,boss.hp+1);duel.streak=0;
           pop(o.x,o.y,'PUŁAPKA! Łukasz +1','#ff7975');sound('buzz');burst(o.x,o.y,'#ff7975');
           fanMood('sad',1.2);fanSay('TO BYŁA PUŁAPKA!',1.4);boss.say='Ha!';boss.sayT=1.2;
-        }else if(Math.hypot(o.x-player.x,o.y-(FLOOR-PLAYER_H*0.6))<zone)parry(o);
+        }else if(Math.hypot(o.x-player.x,o.y-(feetY()-PLAYER_H*0.6))<zone)parry(o);
         else{used=false;if(!shot.whiffed){shot.whiffed=true;pop(o.x,o.y-40,'ZA DALEKO','#c8d5e8');}continue;}
         break;
       }
@@ -666,9 +684,9 @@ function drawFinal(){
   }
   // Strefa odbicia — pierścień wokół Damiana.
   ctx.save();ctx.strokeStyle='rgba(139,255,157,.22)';ctx.lineWidth=2;ctx.setLineDash([6,10]);
-  ctx.beginPath();ctx.arc(player.x,FLOOR-PLAYER_H*0.6,DUEL.parry[difficulty],0,Math.PI*2);ctx.stroke();ctx.restore();
+  ctx.beginPath();ctx.arc(player.x,feetY()-PLAYER_H*0.6,DUEL.parry[difficulty],0,Math.PI*2);ctx.stroke();ctx.restore();
   if(target&&!paused){
-    const hand=damianHand(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,finalShot.active);
+    const hand=damianHand(player.x,feetY(),PLAYER_H,player.dir,finalShot.t,finalShot.active);
     ctx.save();ctx.strokeStyle='rgba(255,218,98,.32)';ctx.setLineDash([5,10]);
     ctx.beginPath();ctx.moveTo(hand.x,hand.y);ctx.lineTo(target.x,target.y);ctx.stroke();ctx.restore();
   }
@@ -680,11 +698,15 @@ function playerWidth(){
   return PLAYER_H*(ready(img)?img.naturalWidth/img.naturalHeight:0.65);
 }
 function updatePlayer(dt){
-  const left=keys.has('arrowleft')||keys.has('a')||[...pointers.values()].includes(-1);
-  const right=keys.has('arrowright')||keys.has('d')||[...pointers.values()].includes(1);
-  const dir=Number(right)-Number(left);
-  player.moving=dir!==0;if(dir)player.dir=dir;
-  player.x+=dir*470*dt+player.knock*dt;player.knock*=Math.exp(-12*dt);
+  const left=keys.has('arrowleft')||keys.has('a'),right=keys.has('arrowright')||keys.has('d');
+  let axis=Number(right)-Number(left);
+  if(!axis&&stick.id!==null){const dx=stick.x-stick.ox;if(Math.abs(dx)>STICK_DEAD)axis=Math.sign(dx)*Math.min(1,(Math.abs(dx)-STICK_DEAD)/(STICK_FULL-STICK_DEAD));}
+  player.axis=axis;
+  player.moving=axis!==0&&!player.air;if(axis)player.dir=Math.sign(axis);
+  player.x+=axis*470*dt+player.knock*dt;player.knock*=Math.exp(-12*dt);
+  // Skok: w powietrzu brak zmiany kierunku sprite'a, przysiad przy odbiciu i lądowaniu.
+  if(player.air){player.vy-=JUMP_G*dt;player.jumpY+=player.vy*dt;if(player.jumpY<=0){player.jumpY=0;player.air=false;player.squash=0.14;}}
+  player.squash=Math.max(0,player.squash-dt);
   const half=playerWidth()/2;player.x=Math.max(half,Math.min(W-half,player.x));
   player.red=Math.max(0,player.red-dt);player.green=Math.max(0,player.green-dt);
 }
@@ -693,7 +715,7 @@ function updatePlayer(dt){
 function collides(o){
   const s=size(o),half=playerWidth()*.30;
   return o.x+s.w/2>player.x-half&&o.x-s.w/2<player.x+half&&
-    o.y+s.h/2>FLOOR-PLAYER_H&&o.y-s.h/2<FLOOR;
+    o.y+s.h/2>feetY()-PLAYER_H&&o.y-s.h/2<feetY();
 }
 function collect(o){
   if(o.kind==='logo'){boost=level===4?2:BOOST_TIME;sound('powerup');vibrate(30);burst(player.x,FLOOR-80,'#ffda62');return;}
@@ -786,11 +808,13 @@ function background(){
 function drawPlayer(){
   if(level===4){
     // Smuga uniku — półprzezroczyste klatki za Damianem.
-    for(const g of duel.ghosts){ctx.save();ctx.globalAlpha=g.life*0.9;ctx.translate(g.x,FLOOR);ctx.scale(g.dir,1);picture('damian',-PLAYER_H/2,-PLAYER_H,PLAYER_H,PLAYER_H);ctx.restore();}
-    drawDamian(player.x,FLOOR,PLAYER_H,player.dir,finalShot.t,finalShot.active,true);return;
+    for(const g of duel.ghosts){ctx.save();ctx.globalAlpha=g.life*0.9;ctx.translate(g.x,g.y);ctx.scale(g.dir,1);picture('damian',-PLAYER_H/2,-PLAYER_H,PLAYER_H,PLAYER_H);ctx.restore();}
+    drawDamian(player.x,feetY(),PLAYER_H,player.dir,finalShot.t,finalShot.active,true);return;
   }
   const w=playerWidth(),bounce=player.moving?Math.sin(clock*19)*4:0;
-  ctx.save();ctx.translate(player.x,FLOOR+bounce);
+  ctx.save();ctx.translate(player.x,feetY()+bounce);
+  if(player.squash>0){const q=player.squash*2;ctx.scale(1+q*0.5,1-q*0.5);}
+  else if(player.air)ctx.scale(0.94,1.06);
   ctx.rotate(player.moving?player.dir*8*Math.PI/180:0);
   ctx.scale(player.dir,1);
   if(invulnerable>0)ctx.globalAlpha=Math.sin(clock*35)>0?0.4:1;
@@ -877,10 +901,17 @@ function drawUI(){
     drawHUD();
     panel(14,654,320,50);
     text('Czas: '+Math.max(0,Math.ceil(LEVELS[level].time-elapsed))+' s',174,679,23,LEVELS[level].time-elapsed<=10?'#ff7975':'#ffda62');
+    if(level!==4){panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,player.air?'#2f4f8a':'#1d355f');text('SKOK · ↑ / SPACJA',1135,659,23,'#fff');text('lub joystick w górę',1135,688,14,'#c8d5e8');}
+    if(stick.id!==null&&!paused){
+      // Rysunek joysticka: pierścień w miejscu dotyku, gałka w bieżącej pozycji (ograniczona do promienia).
+      const dx=stick.x-stick.ox,dy=stick.y-stick.oy,d=Math.hypot(dx,dy)||1,r=Math.min(d,70);
+      ctx.save();ctx.globalAlpha=0.55;ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.beginPath();ctx.arc(stick.ox,stick.oy,70,0,Math.PI*2);ctx.stroke();
+      ctx.globalAlpha=0.8;ctx.fillStyle=player.air?'#ffda62':'#1b2a4a';ctx.beginPath();ctx.arc(stick.ox+dx/d*r,stick.oy+dy/d*r,26,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
+    }
     if(level===4){
       if(elapsed<8)text('Odbijaj jedynki, gdy są w pierścieniu · uskakuj przed sprawdzianem',670,680,17,'#ffda62');
       panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,firePointers.size?'#307940':'#1c5930');
-      text('ODBIJ · SPACJA',1135,669,23,'#fff');
+      text('ODBIJ · SPACJA',1135,659,23,'#fff');text('skok: joystick w górę / ↑',1135,688,14,'#c8d5e8');
     }
     if(noticeTime>0){panel(300,102,680,44);text(notice,640,124,21,'#ffda62');}
     if(paused){panel(290,240,700,230);text('PAUZA',640,300,48,'#ffda62');text('P / Enter / dotknij, aby wrócić',640,370,25);}
@@ -896,7 +927,8 @@ function drawUI(){
       text('Pięć klas — w finale pojedynek z Łukaszem',640,525,24,'#ffda62');
       text('Piątki w serii: +100 do +200 pkt · jedynka zeruje serię',640,558,18,'#c3d0e2');
       button('Naciśnij Enter / dotknij ekranu');
-      text('← → lub A/D: ruch · P: pauza · R: restart · M: dźwięk',640,664,20,'#c3d0e2');
+      text('← → lub A/D: ruch · ↑ / W / spacja: skok · P: pauza · R: restart · M: dźwięk',640,664,19,'#c3d0e2');
+      text('Telefon: joystick pod lewym kciukiem (w górę = skok) · przycisk po prawej',640,692,16,'#8fa2bd');
     }else if(state==='difficulty'){
       text('Wybierz trudność',640,140,46,'#ffda62');
       text('← → i Enter lub dotknij wybranej karty',640,205,24);
@@ -929,13 +961,13 @@ function drawUI(){
       text(final?'Grasz Damianem — nauczycielem':(fem()?'Grasz uczennicą':'Grasz uczniem'),815,250,29);
       const lines=final?
         ['Rada pedagogiczna: Ty kontra Łukasz, pasek na pasek.',
-         'Jedynkę odbij piątką, gdy jest blisko — wraca do niego.',
+         'Jedynkę odbij piątką, gdy jest blisko — wraca do niego. Płaskie przeskocz (↑).',
          'Sprawdzianu nie odbijesz: uskocz. Pułapki nie ruszaj.',
          'Seria odbić ×2, ×3. Kibic w kryzysie rzuci Ci piątkę.']:
         ['Zbieraj piątki i unikaj jedynek.',
          'Damian pomaga: patroluje i rzuca Ci piątki.',
          level===3?'Łukasz celuje w Ciebie — unikaj jego rzutów.':'Trzy jedynki oznaczają powtórkę klasy.',
-         'Piątki od Damiana nie karzą za nieudany chwyt.'];
+         level===0?'Skocz (↑ / spacja / joystick w górę), by złapać piątkę wyżej.':'Piątki od Damiana nie karzą za nieudany chwyt.'];
       lines.forEach((line,i)=>text(line,815,315+i*44,21,'#d2dfed'));
       if(final){
         // Legenda pocisków: odbij / uskocz / nie odbijaj.
