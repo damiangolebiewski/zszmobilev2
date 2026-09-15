@@ -441,8 +441,8 @@ function burst(x,y,color){
 
 // DAMIAN — nauczyciel wspierający ucznia w klasach 2–4.
 const teacher={x:240,feet:405,h:PLAYER_H,dir:1,walkDir:1,moving:false,wait:3,t:0,active:false,released:false,aimX:640};
-const finalShot={t:0,active:false,released:false,cooldown:0};
-let friendly=[],fx=[];
+const finalShot={t:0,active:false,hit:false,cooldown:0};
+let fx=[];
 function resetTeacher(){Object.assign(teacher,{x:240,walkDir:1,moving:false,wait:3,t:0,active:false,released:false,dir:1});}
 function damianPose(t,active){
   if(!active)return 0;
@@ -480,7 +480,7 @@ function drawDamian(x,feet,h,dir,t,active,isPlayer=false){
     picture('damian',-h/2,-h,h,h);ctx.restore();
   }else picture('damian',-h/2,-h,h,h);
   ctx.restore();
-  if(active&&t<0.24){
+  if(active&&t<0.24&&!isPlayer){
     const hand=damianHand(x,feet,h,dir,t,active);
     text('5',hand.x,hand.y,27,'#60e473');
   }
@@ -515,16 +515,16 @@ function drawTeacher(){
 // KLASA 5 — RADA PEDAGOGICZNA: pojedynek Damiana z Łukaszem na paski argumentów.
 // Jedynka odbita piątką blisko Damiana wraca do Łukasza (−1). Sprawdzianu nie da się odbić (−2 dla Damiana).
 // Pułapka wygląda jak piątka: odbicie daje Łukaszowi +1. Kibic w tle reaguje i w kryzysie rzuca piątkę-życie.
-const DUEL={hp:[5,6,6],bossHp:[5,6,8],parry:[260,210,170],logoEvery:30};
+const DUEL={hp:[5,6,6],bossHp:[5,6,8],parry:[200,175,150],window:[0.32,0.24,0.18],logoEvery:30};
 const duel={playerHp:5,maxHp:5,streak:0,hitStreak:0,ending:0,freeze:0,ghosts:[],helpSent:false};
 const fan={x:150,feet:400,h:120,mood:'idle',t:0,say:'',sayT:0,cheerIn:3,throwT:0};
 const LUKASZ_LINES=['Niemożliwe!','To był test!','Sprawdzam!','Poprawka?!','Hmm…','Zaraz, zaraz…'];
 const FAN_LINES=['DAWAJ!','ODBIJ!','DAMIAN!','JESZCZE RAZ!'];
 function resetFinal(){
-  fx=[];friendly=[];duel.freeze=0;duel.ghosts=[];duel.helpSent=false;
+  fx=[];duel.freeze=0;duel.ghosts=[];duel.helpSent=false;
   duel.maxHp=duel.playerHp=DUEL.hp[difficulty];duel.streak=0;duel.hitStreak=0;duel.ending=0;
   Object.assign(fan,{mood:'idle',t:0,say:'',sayT:0,cheerIn:3,throwT:0});
-  Object.assign(finalShot,{t:0,active:false,released:false,cooldown:0});
+  Object.assign(finalShot,{t:0,active:false,hit:false,cooldown:0});
   player.tilt=0;
 }
 function multiplier(){return Math.min(3,1+Math.floor(duel.streak/3));}
@@ -544,15 +544,15 @@ function hitSegment(x1,y1,x2,y2,left,top,right,bottom){
 }
 function pop(x,y,label,color='#ffda62'){fx.push({x,y,label,color,life:0.8,maxLife:0.8});}
 function dropMarker(){fx.push({kind:'marker',x:player.x+player.dir*30,y:FLOOR-PLAYER_H*0.55,vx:-player.dir*180,vy:-330,rot:0,life:1.1,maxLife:1.1});}
-// Cel: najbliższy nadlatujący pocisk do odbicia (jedynka lub pułapka) w zasięgu 420 px.
-function aimTarget(){
-  let target=null,bestD=420;
-  for(const o of items){
-    if(o.warning>0||o.reflected||(o.kind!=='1'&&o.kind!=='trap'))continue;
-    const d=Math.hypot(o.x-player.x,o.y-(feetY()-PLAYER_H*0.6));
-    if(d<bestD){target=o;bestD=d;}
-  }
-  return target;
+// PAROWANIE — zamach markerem z oknem czasowym; jedynka w strefie wokół tułowia zostaje odbita natychmiast.
+function chest(){return {x:player.x,y:feetY()-PLAYER_H*0.6};}
+function parryable(o){return o.warning===0&&!o.reflected&&(o.kind==='1'||o.kind==='trap');}
+// Czas, po jakim pocisk wejdzie w strefę (do kurczącego się okręgu); 0 = już w strefie.
+function timeToZone(o){
+  const c=chest(),dx=c.x-o.x,dy=c.y-o.y,d=Math.hypot(dx,dy),R=DUEL.parry[difficulty];
+  if(d<=R)return 0;
+  const approach=(o.vx*dx+o.vy*dy)/(d||1);
+  return approach>40?(d-R)/approach:9;
 }
 function damagePlayer(amount,o){
   if(invulnerable>0)return;
@@ -567,15 +567,17 @@ function damagePlayer(amount,o){
 }
 function bossHit(o){
   boss.hp=Math.max(0,boss.hp-1);boss.knock=boss.face*-1*70;boss.tilt=-0.22;boss.flash=0.3;bossSay();
-  const gain=100*multiplier();score+=gain;duel.streak++;duel.hitStreak=0;
+  const gain=100*multiplier()*(o.perfect?2:1);score+=gain;duel.streak++;duel.hitStreak=0;
   pop(boss.x-boss.face*110,boss.feet-boss.h*0.5,'−1  +'+gain,'#ffda62');burst(o.x,o.y,'#ffda62');burst(o.x,o.y,'#ff7975');
   sound('clang');vibrate(40);shake=.18;duel.freeze=0.06;
   fanMood('cheer',1.1);fanSay(['TAK!','JEST!','BRAWO!'][Math.floor(Math.random()*3)],1.1);
   if(boss.hp<=0){boss.defeated=true;boss.active=false;boss.say='Dobra, wygrałeś…';boss.sayT=1.6;fanMood('cheer',1.6);fanSay('ZDANE!',1.6);duel.ending=1.4;items=items.filter(i=>i.kind==='logo');sound('fanfare');}
 }
-function parry(o){
-  o.reflected=true;o.homing=true;o.age=0;o.trail=[];
-  pop(o.x,o.y,'ODBICIE ×'+multiplier());sound('clang');duel.freeze=0.05;burst(o.x,o.y,'#8bff9d');
+function parry(o,perfect){
+  o.reflected=true;o.homing=true;o.age=0;o.trail=[];o.speed=perfect?1150:760;o.perfect=perfect;
+  finalShot.hit=true;
+  pop(o.x,o.y-20,(perfect?'PERFEKT! ':'ODBICIE ')+'×'+multiplier()*(perfect?2:1),perfect?'#ffda62':'#8bff9d');
+  sound('clang');duel.freeze=perfect?0.09:0.05;burst(o.x,o.y,perfect?'#ffda62':'#8bff9d');vibrate(perfect?[20,30,40]:25);
 }
 function updateFinal(dt){
   fan.t=Math.max(0,fan.t-dt);fan.sayT=Math.max(0,fan.sayT-dt);fan.cheerIn-=dt;
@@ -593,49 +595,24 @@ function updateFinal(dt){
   for(const g of duel.ghosts)g.life-=dt;duel.ghosts=duel.ghosts.filter(g=>g.life>0);
   finalShot.cooldown=Math.max(0,finalShot.cooldown-dt);
   if(!finalShot.active&&finalShot.cooldown===0&&invulnerable<INVULNERABLE-0.45&&(keys.has(' ')||firePointers.size)){
-    finalShot.active=true;finalShot.t=0;finalShot.released=false;
+    finalShot.active=true;finalShot.t=0;finalShot.hit=false;sound('throw');
   }
   if(finalShot.active){
     finalShot.t+=dt;
-    if(!finalShot.released&&finalShot.t>=0.24){
-      const hand=damianHand(player.x,feetY(),PLAYER_H,player.dir,finalShot.t,true);
-      const target=aimTarget();
-      const tx=target?target.x+target.vx*0.2:hand.x,ty=target?target.y+target.vy*0.2:hand.y-500;
-      const dx=tx-hand.x,dy=ty-hand.y,length=Math.hypot(dx,dy)||1;
-      friendly.push({x:hand.x,y:hand.y,oldX:hand.x,oldY:hand.y,vx:dx/length*720,vy:dy/length*720,target,trail:[]});
-      burst(hand.x,hand.y,'#60e473');
-      finalShot.released=true;sound('throw');
-    }
-    if(finalShot.t>=0.5){finalShot.active=false;finalShot.cooldown=[0.1,0.2,0.3][difficulty];}
-  }
-  const zone=DUEL.parry[difficulty];
-  for(let i=friendly.length-1;i>=0;i--){
-    const shot=friendly[i];shot.oldX=shot.x;shot.oldY=shot.y;
-    shot.trail=shot.trail||[];shot.trail.unshift({x:shot.x,y:shot.y});shot.trail.length=Math.min(shot.trail.length,9);
-    if(shot.target&&!shot.target.reflected&&items.includes(shot.target)){
-      const dx=shot.target.x-shot.x,dy=shot.target.y-shot.y,length=Math.hypot(dx,dy)||1;
-      const blend=1-Math.exp(-10*dt);
-      shot.vx=shot.vx*(1-blend)+dx/length*720*blend;shot.vy=shot.vy*(1-blend)+dy/length*720*blend;
-    }
-    shot.x+=shot.vx*dt;shot.y+=shot.vy*dt;
-    let used=false;
-    for(let j=items.length-1;j>=0;j--){
-      const o=items[j];if((o.kind!=='1'&&o.kind!=='trap')||o.reflected||o.warning>0)continue;
-      // Ruch względny obu pocisków zapobiega przenikaniu przy małej liczbie FPS.
-      const nextX=o.x+o.vx*dt,nextY=o.y+(o.vy+(o.gravity||0)*dt)*dt;
-      if(hitSegment(shot.oldX-o.x,shot.oldY-o.y,shot.x-nextX,shot.y-nextY,-39,-44,39,44)){
-        used=true;
+    const win=DUEL.window[difficulty],R=DUEL.parry[difficulty],c=chest();
+    if(finalShot.t<=win){
+      for(let j=items.length-1;j>=0;j--){
+        const o=items[j];if(!parryable(o))continue;
+        const d=Math.hypot(o.x-c.x,o.y-c.y);if(d>R)continue;
         if(o.kind==='trap'){
-          items.splice(j,1);boss.hp=Math.min(boss.maxHp,boss.hp+1);duel.streak=0;
+          items.splice(j,1);boss.hp=Math.min(boss.maxHp,boss.hp+1);duel.streak=0;finalShot.hit=true;
           pop(o.x,o.y,'PUŁAPKA! Łukasz +1','#ff7975');sound('buzz');burst(o.x,o.y,'#ff7975');
           fanMood('sad',1.2);fanSay('TO BYŁA PUŁAPKA!',1.4);boss.say='Ha!';boss.sayT=1.2;
-        }else if(Math.hypot(o.x-player.x,o.y-(feetY()-PLAYER_H*0.6))<zone)parry(o);
-        else{used=false;if(!shot.whiffed){shot.whiffed=true;pop(o.x,o.y-40,'ZA DALEKO','#c8d5e8');}continue;}
-        break;
+        }else parry(o,d<70);
       }
     }
-    if(used||shot.y<-40||shot.y>H+60||shot.x<-60||shot.x>W+60)friendly.splice(i,1);
-    if(state!=='play')return;
+    // Zamach w pustkę kosztuje 0,4 s odpoczynku; trafiony zamach jest szybki.
+    if(finalShot.t>=0.35){finalShot.active=false;finalShot.cooldown=finalShot.hit?0.08:0.4;}
   }
 }
 function drawFan(){
@@ -665,29 +642,29 @@ function drawFan(){
   }
 }
 function drawFinal(){
-  const target=aimTarget();
-  // Znaczniki nad pociskami: co odbić, przed czym uskoczyć, czego nie ruszać.
+  const R=DUEL.parry[difficulty],c=chest();
+  // Znaczniki nad pociskami i kurczący się okrąg — domyka się, gdy pocisk wchodzi w strefę.
   for(const o of items){
     if(o.warning>0||o.reflected||o.kind==='logo'||o.kind==='5')continue;
     const label=o.kind==='exam'?'USKOCZ':o.kind==='trap'?'NIE ODBIJAJ':'ODBIJ';
     const color=o.kind==='exam'?'#fff':o.kind==='trap'?'#ff7975':'#8bff9d';
     text(label,o.x,o.y-58,15,color);
+    if(o.kind==='exam')continue;
+    const t=timeToZone(o);
+    ctx.save();ctx.lineWidth=t===0?4:2.5;ctx.strokeStyle=t===0?(o.kind==='trap'?'#ff7975':'#8bff9d'):'rgba(255,255,255,.75)';
+    ctx.beginPath();ctx.arc(o.x,o.y,t===0?44:Math.min(200,44+t*230),0,Math.PI*2);ctx.stroke();ctx.restore();
   }
-  if(target){ctx.save();ctx.strokeStyle='#ffda62';ctx.lineWidth=3;ctx.beginPath();ctx.ellipse(target.x,target.y,42,48,0,0,Math.PI*2);ctx.stroke();ctx.restore();}
-  for(const shot of friendly){
-    drawTrail(shot,'#60e473');
-    ctx.save();ctx.shadowColor='#60e473';ctx.shadowBlur=14;
-    ctx.font='900 36px Arial,sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.strokeText('5',shot.x,shot.y);text('5',shot.x,shot.y,36,'#2ecc40');ctx.restore();
+  // Strefa parowania — pierścień wokół tułowia; podczas okna zamachu świeci.
+  const active=finalShot.active&&finalShot.t<=DUEL.window[difficulty];
+  ctx.save();ctx.strokeStyle=active?'rgba(139,255,157,.9)':'rgba(139,255,157,.25)';ctx.lineWidth=active?4:2;ctx.setLineDash(active?[]:[6,10]);
+  ctx.beginPath();ctx.arc(c.x,c.y,R,0,Math.PI*2);ctx.stroke();
+  if(finalShot.active){
+    // Smuga markera — łuk zamachu przed Damianem.
+    const p=Math.min(1,finalShot.t/0.35),a0=-1.2+p*2.2;
+    ctx.globalAlpha=1-p*0.7;ctx.strokeStyle='#fff';ctx.lineWidth=7;ctx.lineCap='round';ctx.setLineDash([]);
+    ctx.beginPath();ctx.arc(c.x,c.y,PLAYER_H*0.55,a0-0.9,a0);ctx.stroke();
   }
-  // Strefa odbicia — pierścień wokół Damiana.
-  ctx.save();ctx.strokeStyle='rgba(139,255,157,.22)';ctx.lineWidth=2;ctx.setLineDash([6,10]);
-  ctx.beginPath();ctx.arc(player.x,feetY()-PLAYER_H*0.6,DUEL.parry[difficulty],0,Math.PI*2);ctx.stroke();ctx.restore();
-  if(target&&!paused){
-    const hand=damianHand(player.x,feetY(),PLAYER_H,player.dir,finalShot.t,finalShot.active);
-    ctx.save();ctx.strokeStyle='rgba(255,218,98,.32)';ctx.setLineDash([5,10]);
-    ctx.beginPath();ctx.moveTo(hand.x,hand.y);ctx.lineTo(target.x,target.y);ctx.stroke();ctx.restore();
-  }
+  ctx.restore();
 }
 
 // PLAYER — fizyka niezależna od liczby klatek; hitbox to 60% sprite'a.
@@ -759,7 +736,7 @@ function update(dt){
     if(o.homing){
       // Odbita jedynka leci do tułowia Łukasza i zabiera mu punkt argumentów.
       const t=bossTorso(),dx=t.x-o.x,dy=t.y-o.y,d=Math.hypot(dx,dy)||1;
-      o.vx=dx/d*760;o.vy=dy/d*760;
+      const sp=o.speed||760;o.vx=dx/d*sp;o.vy=dy/d*sp;
       if(d<55){items.splice(i,1);if(!boss.defeated)bossHit(o);if(state!=='play')return;if(boss.defeated)break;continue;}
     }
     if(o.thrown&&!o.reflected)o.vy+=o.gravity*dt;
@@ -907,7 +884,7 @@ function drawUI(){
       ctx.globalAlpha=0.8;ctx.fillStyle=player.air?'#ffda62':'#1b2a4a';ctx.beginPath();ctx.arc(stick.ox+dx/d*r,stick.oy+dy/d*r,26,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
     }
     if(level===4){
-      if(elapsed<8)text('Odbijaj jedynki, gdy są w pierścieniu · uskakuj przed sprawdzianem',670,680,17,'#ffda62');
+      if(elapsed<8)text('Naciśnij ODBIJ, gdy okrąg domknie się na jedynce · sprawdzian przeskocz',670,680,17,'#ffda62');
       panel(jumpBox.x,jumpBox.y,jumpBox.w,jumpBox.h,player.air?'#2f4f8a':'#1d355f');text('SKOK · ↑',1135,553,23,'#fff');
       panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,firePointers.size?'#307940':'#1c5930');text('ODBIJ · SPACJA',1135,659,23,'#fff');
     }
@@ -959,9 +936,9 @@ function drawUI(){
       text(final?'Grasz Damianem — nauczycielem':(fem()?'Grasz uczennicą':'Grasz uczniem'),815,250,29);
       const lines=final?
         ['Rada pedagogiczna: Ty kontra Łukasz, pasek na pasek.',
-         'Jedynkę odbij piątką, gdy jest blisko — wraca do niego. Płaskie przeskocz (↑).',
-         'Sprawdzianu nie odbijesz: uskocz. Pułapki nie ruszaj.',
-         'Seria odbić ×2, ×3. Kibic w kryzysie rzuci Ci piątkę.']:
+         'Zamach ODBIJ, gdy okrąg domknie się na jedynce — wraca do niego.',
+         'Blisko ciała = PERFEKT (×2). Zamach w pustkę kosztuje 0,4 s.',
+         'Sprawdzian przeskocz (↑). Pułapki nie ruszaj — złap ją za +50.']:
         ['Zbieraj piątki i unikaj jedynek.',
          'Damian pomaga: patroluje i rzuca Ci piątki.',
          level===3?'Łukasz celuje w Ciebie — unikaj jego rzutów.':'Trzy jedynki oznaczają powtórkę klasy.',
