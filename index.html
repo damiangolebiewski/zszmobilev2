@@ -182,10 +182,10 @@ function togglePause(){if(state==='play'){paused=!paused;clearInput();}}
 
 // INPUT — Pointer Events obsługują także kilka palców naraz.
 const keys=new Set(),pointers=new Map(),firePointers=new Set();
-const fireBox={x:1010,y:612,w:250,h:94};
-// JOYSTICK — pojawia się w miejscu dotyku lewej połowy; w bok ruch, pchnięcie w górę skok (raz na pchnięcie).
-const stick={id:null,ox:0,oy:0,x:0,y:0,jumped:false};
-const STICK_DEAD=12,STICK_FULL=40,STICK_JUMP=45;
+const fireBox={x:1010,y:612,w:250,h:94},jumpBox={x:1010,y:508,w:250,h:90};
+// JOYSTICK — pojawia się w miejscu dotyku lewej połowy; tylko ruch w bok. Skok i rzut są na przyciskach po prawej.
+const stick={id:null,ox:0,oy:0,x:0,y:0};
+const STICK_DEAD=12,STICK_FULL=40;
 function actionLabel(){return level===4?'ODBIJ':'SKOK';}
 function point(e){const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};}
 function inside(p,r){return p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h;}
@@ -215,7 +215,8 @@ canvas.addEventListener('pointerdown',e=>{
   if(state==='play'){
     if(inside(p,pauseBox)||paused){togglePause();return;}
     if(inside(p,fireBox)){if(level===4)firePointers.add(e.pointerId);else jump();}
-    else if(p.x<W/2&&stick.id===null){Object.assign(stick,{id:e.pointerId,ox:p.x,oy:p.y,x:p.x,y:p.y,jumped:false});}
+    else if(level===4&&inside(p,jumpBox))jump();
+    else if(p.x<W/2&&stick.id===null){Object.assign(stick,{id:e.pointerId,ox:p.x,oy:p.y,x:p.x,y:p.y});}
     try{canvas.setPointerCapture(e.pointerId);}catch{}
   }else if(state==='difficulty'){
     if(menuAge<0.2)return;
@@ -232,9 +233,6 @@ canvas.addEventListener('pointerdown',e=>{
 canvas.addEventListener('pointermove',e=>{
   if(stick.id!==e.pointerId)return;
   const p=point(e);stick.x=p.x;stick.y=p.y;
-  const dy=stick.y-stick.oy;
-  if(dy<-STICK_JUMP&&!stick.jumped){stick.jumped=true;jump();}
-  if(dy>-20)stick.jumped=false;
 });
 for(const event of ['pointerup','pointercancel','lostpointercapture'])
   canvas.addEventListener(event,e=>{pointers.delete(e.pointerId);firePointers.delete(e.pointerId);if(stick.id===e.pointerId)stick.id=null;});
@@ -901,17 +899,17 @@ function drawUI(){
     drawHUD();
     panel(14,654,320,50);
     text('Czas: '+Math.max(0,Math.ceil(LEVELS[level].time-elapsed))+' s',174,679,23,LEVELS[level].time-elapsed<=10?'#ff7975':'#ffda62');
-    if(level!==4){panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,player.air?'#2f4f8a':'#1d355f');text('SKOK · ↑ / SPACJA',1135,659,23,'#fff');text('lub joystick w górę',1135,688,14,'#c8d5e8');}
+    if(level!==4){panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,player.air?'#2f4f8a':'#1d355f');text('SKOK · ↑ / SPACJA',1135,659,23,'#fff');}
     if(stick.id!==null&&!paused){
       // Rysunek joysticka: pierścień w miejscu dotyku, gałka w bieżącej pozycji (ograniczona do promienia).
-      const dx=stick.x-stick.ox,dy=stick.y-stick.oy,d=Math.hypot(dx,dy)||1,r=Math.min(d,70);
+      const dx=stick.x-stick.ox,dy=0,d=Math.abs(dx)||1,r=Math.min(d,70);
       ctx.save();ctx.globalAlpha=0.55;ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.beginPath();ctx.arc(stick.ox,stick.oy,70,0,Math.PI*2);ctx.stroke();
       ctx.globalAlpha=0.8;ctx.fillStyle=player.air?'#ffda62':'#1b2a4a';ctx.beginPath();ctx.arc(stick.ox+dx/d*r,stick.oy+dy/d*r,26,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.restore();
     }
     if(level===4){
       if(elapsed<8)text('Odbijaj jedynki, gdy są w pierścieniu · uskakuj przed sprawdzianem',670,680,17,'#ffda62');
-      panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,firePointers.size?'#307940':'#1c5930');
-      text('ODBIJ · SPACJA',1135,659,23,'#fff');text('skok: joystick w górę / ↑',1135,688,14,'#c8d5e8');
+      panel(jumpBox.x,jumpBox.y,jumpBox.w,jumpBox.h,player.air?'#2f4f8a':'#1d355f');text('SKOK · ↑',1135,553,23,'#fff');
+      panel(fireBox.x,fireBox.y,fireBox.w,fireBox.h,firePointers.size?'#307940':'#1c5930');text('ODBIJ · SPACJA',1135,659,23,'#fff');
     }
     if(noticeTime>0){panel(300,102,680,44);text(notice,640,124,21,'#ffda62');}
     if(paused){panel(290,240,700,230);text('PAUZA',640,300,48,'#ffda62');text('P / Enter / dotknij, aby wrócić',640,370,25);}
@@ -928,7 +926,7 @@ function drawUI(){
       text('Piątki w serii: +100 do +200 pkt · jedynka zeruje serię',640,558,18,'#c3d0e2');
       button('Naciśnij Enter / dotknij ekranu');
       text('← → lub A/D: ruch · ↑ / W / spacja: skok · P: pauza · R: restart · M: dźwięk',640,664,19,'#c3d0e2');
-      text('Telefon: joystick pod lewym kciukiem (w górę = skok) · przycisk po prawej',640,692,16,'#8fa2bd');
+      text('Telefon: joystick pod lewym kciukiem · przyciski SKOK / ODBIJ po prawej',640,692,16,'#8fa2bd');
     }else if(state==='difficulty'){
       text('Wybierz trudność',640,140,46,'#ffda62');
       text('← → i Enter lub dotknij wybranej karty',640,205,24);
@@ -967,7 +965,7 @@ function drawUI(){
         ['Zbieraj piątki i unikaj jedynek.',
          'Damian pomaga: patroluje i rzuca Ci piątki.',
          level===3?'Łukasz celuje w Ciebie — unikaj jego rzutów.':'Trzy jedynki oznaczają powtórkę klasy.',
-         level===0?'Skocz (↑ / spacja / joystick w górę), by złapać piątkę wyżej.':'Piątki od Damiana nie karzą za nieudany chwyt.'];
+         level===0?'Skocz (↑ / spacja / przycisk SKOK), by złapać piątkę wyżej.':'Piątki od Damiana nie karzą za nieudany chwyt.'];
       lines.forEach((line,i)=>text(line,815,315+i*44,21,'#d2dfed'));
       if(final){
         // Legenda pocisków: odbij / uskocz / nie odbijaj.
